@@ -88,10 +88,12 @@ let
       defaultModel = lib.last defaultModel;
 
       # Hides every other model from /model and pins Ctrl+P cycling to our own
-      # providers. Needed because a shell exporting ANTHROPIC_API_KEY +
-      # ANTHROPIC_BASE_URL for claude-code makes pi report the built-in
-      # `anthropic` provider as ready — otherwise all bundled Claude models show
-      # up in pi, pointed at the claude-code proxy.
+      # providers. A shell exporting ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL
+      # makes pi report the built-in `anthropic` provider as ready, and every
+      # bundled Claude model then shows up pointing at the claude-code proxy.
+      # The provider-pinned commands keep the key out of the shell environment,
+      # so this is a guard now rather than a fix — delete it once pi behaves
+      # with it gone.
       enabledModels = lib.mapAttrsToList (name: _: "${name}/*") providers;
 
       # pi npm-installs declared packages that are missing or out of date on
