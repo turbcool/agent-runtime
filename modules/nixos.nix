@@ -90,11 +90,7 @@ in
     agenixFiles = lib.mkOption {
       type = lib.types.attrsOf lib.types.path;
       default = { };
-      example = literalExpression ''
-        {
-          neoplatform = ../../common/secrets/neoplatform-token.age;
-        }
-      '';
+      example = "{ neoplatform = ../common/secrets/neoplatform-token.age; }";
       description = ''
         agenix ciphertext per provider name. NixOS-only — a container has no
         age identity and resolves `tokenSource.env` instead. Providers left out
