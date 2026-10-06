@@ -19,6 +19,9 @@
 {
   servers = {
     nixos = {
+      # Resolved against nixpkgs and added to the bundle by modules/home.nix,
+      # so it works on NixOS *and* in a container without a host package list.
+      package = "mcp-nixos";
       command = [ "mcp-nixos" ];
     };
     daisyui = {

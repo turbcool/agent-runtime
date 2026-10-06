@@ -39,6 +39,14 @@
     };
   };
 
+  # The home module is a plain *path* — Nix' module system dedupes identical
+  # paths, so a host may import `homeModules.default` itself and still get the
+  # module injected exactly once via `nixosModules.default` ->
+  # `home-manager.sharedModules` (two lambda instances would collide on every
+  # `programs.agent-skills.*` option). The module takes this flake's own inputs
+  # through the `runtimeInputs` module argument, supplied by `mkHmConfig` (and,
+  # for NixOS, by this module via `home-manager.extraSpecialArgs`), so a NixOS
+  # host writes one import and no extra arguments.
   outputs =
     {
       self,
@@ -47,174 +55,222 @@
       ...
     }@inputs:
     let
-      # Keep in sync with /etc/nixos/flake.nix; the hosts pin x86_64-linux.
-      system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
       inherit (nixpkgs) lib;
 
-      # Modules close over this flake's own inputs instead of reading the
-      # consumer's `inputs` module arg, which is what keeps a consumer from
-      # having to declare the runtime's inputs at all.
-      mkModule = path: import path { runtimeInputs = inputs; };
+      # Add a system here to publish for another client fleet; nothing else in
+      # the flake hardcodes one.
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      forAllSystems = lib.genAttrs systems;
+      firstSystem = lib.elemAt systems 0;
 
-      # Standalone Home Manager: the exact module the NixOS hosts get through
-      # common/hm/default.nix, evaluated with no OS underneath. That is what
-      # makes the container config identical to the desktop config.
-      hmConfig = home-manager.lib.homeManagerConfiguration {
-        inherit pkgs;
-        extraSpecialArgs = { inherit inputs; };
-        modules = [
-          (mkModule ./modules/home.nix)
-          ./modules/container.nix
-        ];
+      # The registries, as plain data. A client extends a record instead of
+      # re-deriving it: `agent.providers = agent-runtime.lib.data.providers // { … };`.
+      data =
+        let runtimeInputs = inputs;
+        in {
+          providers = import ./data/providers.nix;
+          mcp = import ./data/mcp.nix;
+          plugins = import ./data/plugins.nix;
+          skills = import ./data/skills.nix { inherit runtimeInputs; };
+        };
+
+      forEachSystem =
+        f:
+        forAllSystems (
+          system:
+          f (
+            rec {
+              inherit system;
+              pkgs = nixpkgs.legacyPackages.${system};
+            }
+          )
+        );
+
+      # The home module (plain path, dedupable) plus container tweaks. Shared by
+      # the standalone config, the container module set, and the package checks.
+      homeModule = ./modules/home.nix;
+      homeModulesList = [ homeModule ./modules/container.nix ];
+
+      mkHmConfig = pkgs: modules: home-manager.lib.homeManagerConfiguration {
+        inherit pkgs modules;
+        extraSpecialArgs = { runtimeInputs = inputs; };
       };
-
-      # --- MCP ------------------------------------------------------------
-      # cfg.mcp is the registry (data/mcp.nix by default, overridable like every
-      # other agent option). Its `npm` set reaches every agent through the Home
-      # Manager module; the rest is opt-in per project via `mcp
-      # <group|server>`, which merges a rendered opencode.json fragment into the
-      # current folder. The configs are baked into a farm and shipped with the
-      # command, so activating one is a local file read — no `nix build`, and the
-      # same behaviour inside a container.
-      mcp = hmConfig.config.agent.mcp;
-      toOpencodeMcp =
-        srv:
-        if srv ? url then
-          {
-            type = "remote";
-            inherit (srv) url;
-            enabled = true;
-          }
-        else
-          {
-            type = "local";
-            inherit (srv) command;
-            enabled = true;
-          };
-      mcpConfigPkgs = lib.mapAttrs (
-        name: members:
-        pkgs.writeText "opencode-mcp-$name.json" (
-          builtins.toJSON {
-            mcp = lib.listToAttrs (
-              map (member: {
-                name = member;
-                value = toOpencodeMcp mcp.servers.${member};
-              }) members
-            );
-          }
-        )
-      ) (mcp.groups // lib.mapAttrs (name: _: [ name ]) mcp.servers);
-      mcpConfigDir = pkgs.linkFarm "agent-runtime-mcp-configs" (
-        lib.mapAttrsToList (name: src: {
-          name = "${name}.json";
-          path = toString src;
-        }) mcpConfigPkgs
-      );
-      mcpUsage = ''
-        Usage: mcp <group|server>
-
-        Groups:
-        ${lib.concatStringsSep "\n" (
-          map (name: "  ${name} → ${lib.concatStringsSep ", " mcp.groups.${name}}") (lib.attrNames mcp.groups)
-        )}
-
-        Servers:
-        ${lib.concatMapStringsSep "\n" (name: "  ${name}") (lib.attrNames mcp.servers)}
-      '';
-
-      # Everything modules/home.nix contributes (pi, opencode, claude,
-      # claude-free, writing) plus this file's `mcp`.
-      agentRuntime = pkgs.buildEnv {
-        name = "agent-runtime";
-        paths = hmConfig.config.agent.runtimePackages ++ [ mcpCommand ];
-        pathsToLink = [
-          "/bin"
-        ];
-      };
-
-      mcpCommand = pkgs.writeShellScriptBin "mcp" ''
-        if [ $# -eq 0 ]; then
-          echo "${mcpUsage}"
-          exit 0
-        fi
-
-        config="${mcpConfigDir}/$1.json"
-        if [ ! -f "$config" ]; then
-          echo "✗ Unknown MCP group or server: $1"
-          echo ""
-          echo "${mcpUsage}"
-          exit 1
-        fi
-
-        if [ -f opencode.json ]; then
-          ${pkgs.jq}/bin/jq -s '.[0] * .[1]' opencode.json "$config" > opencode.json.tmp \
-            && mv opencode.json.tmp opencode.json
-        else
-          cp "$config" opencode.json
-        fi
-        echo "✓ MCP servers activated: $1"
-      '';
-
-      # The rendered ~/.pi and ~/.config/opencode trees as store paths, so a
-      # container image can COPY them straight into $HOME (`cp -rL` it into a
-      # live one, then `chmod -R u+w`: store paths are read-only and pi must be
-      # able to create ~/.pi/agent/sessions).
-      agentRuntimeConfig = pkgs.linkFarm "agent-runtime-config" (
-        lib.mapAttrsToList (name: src: {
-          inherit name;
-          path = toString src;
-        }) hmConfig.config.agent.runtimeFiles
-      );
     in
     {
-      nixosModules.default = ./modules/nixos.nix;
-      homeModules.default = mkModule ./modules/home.nix;
+      # NixOS half: agenix secrets + managed settings + host prerequisites
+      # (programs.npm/nix-ld, derived from the registry) + the auto-wiring of the
+      # home half. The home module is injected through `home-manager.sharedModules`
+      # when this host imports home-manager's NixOS module, so a NixOS client
+      # writes one import and nothing in its Home Manager config.
+      nixosModules.default =
+        import ./modules/nixos.nix {
+          inherit inputs;
+          homeModule = homeModule;
+        };
 
-      homeConfigurations.agent-runtime = hmConfig;
+      # Standalone Home Manager — the module a non-NixOS consumer imports. It
+      # does not include container.nix. The `runtimeInputs` argument is read from
+      # extraSpecialArgs; use `homeConfigurations.agent-runtime` or `.container`
+      # if you do not want to pass it yourself.
+      homeModules.default = homeModule;
 
-      packages.${system} = {
-        inherit agentRuntime agentRuntimeConfig mcpCommand;
-        agent-runtime = agentRuntime;
-        agent-runtime-config = agentRuntimeConfig;
-        mcp = mcpCommand;
-        default = agentRuntime;
-      };
+      # The container flavour as an importable module list (home + container
+      # tweaks), so a standalone Home Manager setup can build its own config with
+      # overrides instead of taking `homeConfigurations.agent-runtime` as given:
+      #   homeManagerConfiguration { modules = [ inputs.agent-runtime.homeModules.container { agent.defaultModel = …; } ]; }
+      homeModules.container = homeModulesList;
 
-      # The contract the modules assert for every consumer, checked against the
-      # bundle the container output ships: every agent must actually be in it.
-      # The command names come from the option, so adding one is covered here
-      # without editing this list.
-      checks.${system}.bundle-contains-agents =
-        pkgs.runCommand "bundle-contains-agents"
-          {
-            nativeBuildInputs = [ pkgs.coreutils ];
-          }
-          ''
-            for bin in ${
-              lib.concatStringsSep " " (
-                builtins.attrNames hmConfig.config.agent.claudeCode.commands
-                ++ [
-                  "opencode"
-                  "pi"
-                  "mcp"
-                ]
-              )
-            }; do
-              if [ ! -x "${agentRuntime}/bin/$bin" ]; then
-                echo "missing from bundle: $bin" >&2
-                exit 1
-              fi
-            done
-            touch $out
-          '';
+      # The exact module set `nixosModules.default` injects, with no OS under it.
+      homeConfigurations.agent-runtime =
+        mkHmConfig nixpkgs.legacyPackages.${firstSystem} homeModulesList;
 
-      devShells.${system}.default = pkgs.mkShellNoCC {
-        packages = [
-          pkgs.jq
-          pkgs.nixfmt
-          pkgs.statix
-        ];
-      };
+      packages = forEachSystem (
+        {
+          pkgs,
+          system,
+          ...
+        }:
+        let
+          hmConfig = mkHmConfig pkgs homeModulesList;
+          cfg = hmConfig.config.agent;
+
+          # Everything modules/home.nix + modules/skills.nix contribute (pi,
+          # opencode, claude, claude-free, writing, mcp, skills) — deliberately
+          # not `home.packages`, because standalone HM folds its own baseline
+          # (man-db, shared-mime-info) into that list.
+          agentRuntime = pkgs.buildEnv {
+            name = "agent-runtime";
+            paths = cfg.runtimePackages;
+            pathsToLink = [
+              "/bin"
+            ];
+          };
+
+          # The rendered ~/.pi and ~/.config/opencode trees as store paths, so a
+          # container image can COPY them straight into $HOME.
+          agentRuntimeConfig = pkgs.linkFarm "agent-runtime-config" (
+            lib.mapAttrsToList (
+              name: src: {
+                inherit name;
+                path = toString src;
+              }
+            )
+            cfg.runtimeFiles
+          );
+
+          # One command instead of the documented four steps: install the bundle
+          # on PATH, copy the config farm onto the writable $HOME, seed the npm
+          # packages the agents expect, and report which tokens are still missing.
+          install = pkgs.substitute {
+            name = "agent-runtime-install";
+            src = ./lib/install.sh;
+            dir = "bin";
+            executable = true;
+            substitutions = [
+              "--replace" "@agentRuntime@" "${agentRuntime}"
+              "--replace" "@agentRuntimeConfig@" "${agentRuntimeConfig}"
+            ];
+          };
+        in
+        {
+          inherit agentRuntime agentRuntimeConfig install;
+          agent-runtime = agentRuntime;
+          agent-runtime-config = agentRuntimeConfig;
+          mcp = cfg.mcpCommand;
+          default = agentRuntime;
+        }
+      );
+
+      # The contract every consumer gets — checked against the bundle the
+      # container output ships: every command must actually be in it. The names
+      # come from the options, so adding one is covered here without editing it.
+      checks = forEachSystem (
+        {
+          pkgs,
+          system,
+          ...
+        }:
+        let
+          hmConfig = mkHmConfig pkgs homeModulesList;
+          agentRuntime = (self.packages.${system}).agentRuntime;
+        in
+        {
+          bundle-contains-agents = pkgs.runCommand "bundle-contains-agents"
+            {
+              nativeBuildInputs = [ pkgs.coreutils ];
+            }
+            ''
+              for bin in ${
+                lib.concatStringsSep " " (
+                  builtins.attrNames hmConfig.config.agent.claudeCode.commands
+                  ++ [
+                    "opencode"
+                    "pi"
+                    "mcp"
+                    "skills"
+                  ]
+                  ++ map (name: "skills-install-${name}") (
+                    builtins.attrNames hmConfig.config.programs.agent-skills.sources
+                  )
+                )
+              }; do
+                if [ ! -x "${agentRuntime}/bin/$bin" ]; then
+                  echo "missing from bundle: $bin" >&2
+                  exit 1
+                fi
+              done
+              touch $out
+            '';
+
+          # A package-backed MCP entry names both an nixpkgs attribute and the
+          # binary inside it; a typo in either is invisible until a project runs
+          # `mcp <server>`, so assert it here instead.
+          mcp-servers-exist = pkgs.runCommand "mcp-servers-exist"
+            {
+              nativeBuildInputs = [ pkgs.coreutils ];
+            }
+            ''
+              for bin in ${
+                lib.concatStringsSep " " (
+                  lib.mapAttrsToList (
+                    name: srv: "${pkgs.${srv.package}}/bin/${builtins.head srv.command}"
+                  ) (lib.filterAttrs (_: srv: srv ? package) hmConfig.config.agent.mcp.servers)
+                )
+              }; do
+                if [ ! -x "$bin" ]; then
+                  echo "MCP server binary not found: $bin" >&2
+                  exit 1
+                fi
+              done
+              touch $out
+            '';
+        }
+      );
+
+      # The data registries, so a client extends a record instead of
+      # re-deriving it.
+      lib.data = data;
+
+      # agent-skills' library, for a client that wants a bundle shape of its own.
+      lib.agentSkills = inputs.agent-skills.lib.agent-skills;
+
+      devShells = forEachSystem (
+        {
+          pkgs,
+          ...
+        }:
+        {
+          default = pkgs.mkShellNoCC {
+            packages = [
+              pkgs.jq
+              pkgs.nixfmt
+              pkgs.statix
+            ];
+          };
+        }
+      );
     };
 }

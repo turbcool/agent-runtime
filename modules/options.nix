@@ -19,6 +19,45 @@
       '';
     };
 
+    skills.sources = lib.mkOption {
+      type = lib.types.attrs;
+      default = { };
+      description = ''
+        Extra agent-skills sources merged into `programs.agent-skills.sources`
+        — the client's own skills, next to the runtime's (data/skills.nix).
+        Sources are `path`-addressed (data/skills.nix sets the precedent): a
+        flake input name cannot be resolved from inside this flake, so a client
+        writes `{ path = "''${inputs.foo}/skills"; }`.
+
+        Declared in both halves on purpose: the NixOS module forwards it into
+        every Home Manager configuration, so a NixOS client declares it once,
+        next to its agenix files.
+      '';
+    };
+
+    mcp = lib.mkOption {
+      type = lib.types.attrs;
+      default = import ../data/mcp.nix;
+      description = ''
+        MCP registry (data/mcp.nix). `npm` is the npm-installed set this module
+        ships to every agent; `servers`+`groups` are what the `mcp
+        <group|server>` command offers. A `servers` entry may carry
+        `package = "<nixpkgs attr>"`, which is resolved, added to the bundle and
+        rendered as a store path.
+      '';
+    };
+
+    npmPrefix = lib.mkOption {
+      type = lib.types.str;
+      default = "$HOME/.npm";
+      description = ''
+        npm's prefix (NixOS-wiki home approach). Its bin/ holds the `mcp.npm`
+        servers, so this is the single source for their absolute paths, for
+        home.sessionPath, for the activation hook that installs them, and for
+        the npmrc the NixOS module sets.
+      '';
+    };
+
     plugins = lib.mkOption {
       type = lib.types.attrs;
       default = import ../data/plugins.nix;

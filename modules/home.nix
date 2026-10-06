@@ -2,18 +2,13 @@
 # the remaining `agent.*` option surface (modules/options.nix).
 #
 # This module is evaluator-agnostic: it needs only `lib`, `pkgs`, `config` and
-# this flake's own inputs — the latter closed over as `runtimeInputs` by
-# flake.nix, never read from the consumer — so the exact same file runs under
-# NixOS+Home Manager and under the standalone homeManagerConfiguration in this
-# flake's `homeConfigurations`, which is what makes the container config
-# identical to the desktop config. Only the token source differs.
-{ runtimeInputs }:
-{
-  config,
-  lib,
-  pkgs,
-  ...
-}:
+# this flake's own inputs, passed in as the `runtimeInputs` module argument
+# (see flake.nix's mkHmConfig / the runtime's NixOS module, which supplies it
+# via `home-manager.extraSpecialArgs`). Because that argument is ordinary
+# module input, this file is a plain *path* — Nix' module system dedupes
+# identical paths, so a host may import `homeModules.default` itself and still
+# get the module injected once through `home-manager.sharedModules`.
+{ runtimeInputs, config, lib, pkgs, ... }:
 
 let
   cfg = config.agent;
@@ -148,11 +143,120 @@ let
     }
   );
 
+  # --- MCP ------------------------------------------------------------------
+  # One registry (data/mcp.nix), one renderer, three delivery routes:
+  #   * npm — npm-installed binaries in npmPrefix/bin, written into
+  #     opencode.json *and* into each provider-pinned command's --mcp-config,
+  #     so every agent has them;
+  #   * servers/groups — opt-in per project through the `mcp` command, whose
+  #     farm below holds one rendered fragment per name.
+  #
+  # A command is absolute wherever this module knows the binary: npm ones from
+  # npmPrefix, `package`-backed ones from the store. An agent inherits the
+  # environment it was launched with, which may predate home.sessionPath (GUI
+  # launch, container without an rc file), so PATH is never the answer. A
+  # command the registry leaves alone (a `docker run` argv, an `npx`
+  # invocation) resolves its own tools and is passed through verbatim.
+  npmCmd = srv: "${npmBinPath}/${srv.command}";
+
+  # Entries naming a nixpkgs package rather than something installed per user.
+  # The package joins the bundle below, so the registry alone decides what a
+  # client has to install — nothing to remember on the host side.
+  mcpPackages = lib.mapAttrs (_: srv: pkgs.${srv.package}) (
+    lib.filterAttrs (_: srv: srv ? package) cfg.mcp.servers
+  );
+
+  # The single opencode dialect mapping. Both opencode.json and the farm below
+  # go through it, so an entry cannot render differently in the two.
+  toOpencodeMcp =
+    name: srv:
+    if srv ? url then
+      {
+        type = "remote";
+        url = srv.url;
+        enabled = true;
+      }
+    else if cfg.mcp.npm ? ${name} then
+      {
+        type = "local";
+        command = [ (npmCmd srv) ] ++ srv.args;
+        enabled = true;
+      }
+    else if srv ? package then
+      {
+        type = "local";
+        command = [ "${mcpPackages.${name}}/bin/${builtins.head srv.command}" ] ++ lib.tail srv.command;
+        enabled = true;
+      }
+    else
+      {
+        type = "local";
+        inherit (srv) command;
+        enabled = true;
+      };
+
+  mcpConfigDir = pkgs.linkFarm "agent-runtime-mcp-configs" (
+    lib.mapAttrsToList (name: src: {
+      name = "${name}.json";
+      path = toString src;
+    }) (
+      lib.mapAttrs (
+        name: members:
+        pkgs.writeText "opencode-mcp-${name}.json" (
+          builtins.toJSON {
+            mcp = lib.listToAttrs (
+              map (member: {
+                name = member;
+                value = toOpencodeMcp member cfg.mcp.servers.${member};
+              })
+              members
+            );
+          }
+        )
+      ) (cfg.mcp.groups // lib.mapAttrs (name: _: [ name ]) cfg.mcp.servers)
+    )
+  );
+
+  mcpUsage = ''
+    Usage: mcp <group|server>
+
+    Groups:
+    ${lib.concatStringsSep "\n" (
+      map (name: "  ${name} → ${lib.concatStringsSep ", " cfg.mcp.groups.${name}}") (lib.attrNames cfg.mcp.groups)
+    )}
+
+    Servers:
+    ${lib.concatMapStringsSep "\n" (name: "  ${name}") (lib.attrNames cfg.mcp.servers)}
+  '';
+
+  # Shipped in the bundle, so the desktop login and a container get the same
+  # command from the same place: activating a group is a local file read.
+  mcpCommand = pkgs.writeShellScriptBin "mcp" ''
+    if [ $# -eq 0 ]; then
+      echo "${mcpUsage}"
+      exit 0
+    fi
+
+    config="${mcpConfigDir}/$1.json"
+    if [ ! -f "$config" ]; then
+      echo "✗ Unknown MCP group or server: $1"
+      echo ""
+      echo "${mcpUsage}"
+      exit 1
+    fi
+
+    if [ -f opencode.json ]; then
+      ${pkgs.jq}/bin/jq -s '.[0] * .[1]' opencode.json "$config" > opencode.json.tmp \
+        && mv opencode.json.tmp opencode.json
+    else
+      cp "$config" opencode.json
+    fi
+    echo "✓ MCP servers activated: $1"
+  '';
+
   # --- opencode ------------------------------------------------------------
-  # cfg.mcp.npm is the npm-installed server set (data/mcp.nix); it is written
-  # here and handed to the provider-pinned commands below, each in its own
-  # dialect. The other servers reach opencode.json through the `mcp
-  # <group|server>` command, which merges a per-server config in.
+  # The npm set lands here through the renderer above; the rest of the registry
+  # is per-project, merged in by `mcp <group|server>`.
   opencodeJson = pkgs.writeText "opencode.json" (
     builtins.toJSON (
       {
@@ -167,13 +271,12 @@ let
           name: "${runtimeInputs.${name}.outPath}/.opencode/plugins/${name}.mjs"
         ) cfg.plugins.opencodePlugins;
         agent.explore.model = cfg.smallModel;
-        mcp = lib.mapAttrs (name: srv: {
-          type = "local";
-          # Absolute path: MCP servers inherit the agent's environment, which
-          # may predate home.sessionPath (e.g. GUI-launched) — never rely on PATH.
-          command = [ "${npmBinPath}/${srv.command}" ] ++ srv.args;
-          enabled = true;
-        }) cfg.mcp.npm;
+        mcp = lib.listToAttrs (
+          lib.mapAttrsToList (name: srv: {
+            inherit name;
+            value = toOpencodeMcp name srv;
+          }) cfg.mcp.npm
+        );
       }
       // {
         provider = lib.mapAttrs (name: p: {
@@ -217,7 +320,7 @@ let
   claudeMcpConfig = pkgs.writeText "claude-code-mcp.json" (
     builtins.toJSON {
       mcpServers = lib.mapAttrs (
-        name: srv: srv // { command = "${npmBinPath}/${srv.command}"; }
+        name: srv: srv // { command = npmCmd srv; }
       ) cfg.mcp.npm;
     }
   );
@@ -304,7 +407,12 @@ let
     ++ [
       llmAgents.opencode
       piNoCrawl
+      mcpCommand
     ]
+    ++ builtins.attrValues mcpPackages
+    # modules/skills.nix builds the per-project installers and the `skills`
+    # dispatcher from the merged source set.
+    ++ [ config.agent.skillTools ]
     ++ lib.optionals cfg.agents.includeTui [ llmAgents.agent-deck ];
 in
 {
@@ -314,12 +422,6 @@ in
   ];
 
   options.agent = {
-    mcp = lib.mkOption {
-      type = lib.types.attrs;
-      default = import ../data/mcp.nix;
-      description = "MCP registry (data/mcp.nix). `npm` is the npm-installed set this module ships to every agent; `servers`+`groups` are what the `mcp <group|server>` command offers.";
-    };
-
     defaultModel = lib.mkOption {
       type = lib.types.str;
       default = "free/main";
@@ -338,17 +440,18 @@ in
       description = "Also install agent-deck. Turn off for slim/headless bundles.";
     };
 
-    npmPrefix = lib.mkOption {
-      type = lib.types.str;
-      default = "$HOME/.npm";
-      description = "npm's prefix (NixOS-wiki home approach). Its bin/ holds the `mcp.npm` servers, so this is where their absolute paths come from.";
-    };
-
     runtimeFiles = lib.mkOption {
       type = lib.types.attrsOf lib.types.raw;
       default = { };
       internal = true;
       description = "Rendered config files as store paths, consumed by this flake's `agent-runtime-config` package.";
+    };
+
+    mcpCommand = lib.mkOption {
+      type = lib.types.package;
+      internal = true;
+      default = mcpCommand;
+      description = "The `mcp` command, rendered from this configuration's own registry. Published as `packages.mcp` so a client can depend on it alone.";
     };
 
     runtimePackages = lib.mkOption {
@@ -375,9 +478,7 @@ in
       # itself (agent.mcp.npm), so a new server needs no edit here.
       activation.installMcpServers = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
         for cmd in ${
-          lib.concatStringsSep " " (
-            map (srv: "${npmBinPath}/${srv.command}") (builtins.attrValues cfg.mcp.npm)
-          )
+          lib.concatStringsSep " " (map npmCmd (builtins.attrValues cfg.mcp.npm))
         }; do
           [ -x "$cmd" ] || {
             $DRY_RUN_CMD ${pkgs.nodejs}/bin/npm install --prefix "${cfg.npmPrefix}" -g \
