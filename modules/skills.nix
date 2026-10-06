@@ -21,17 +21,12 @@ let
   cfg = config.agent;
   skillConfig = import ../data/skills.nix { inherit runtimeInputs; };
 
-  # `.agents/skills` is the cross-vendor convention that agents other than
-  # opencode/claude read; it costs one symlink tree and means a new agent picks
-  # the skills up without another entry here.
-  enabledTargets = [
-    "agents"
-    "claude"
-    "opencode"
-  ];
-
-  # agent-skills resolves these at activation time from $HOME, so the bundle
-  # path has to match its own target dests.
+  # Where each target reads its skills, in $HOME. `.agents/skills` is the
+  # cross-vendor convention that agents other than opencode/claude read; it
+  # costs one symlink tree and means a new agent picks the skills up without
+  # another entry here. agent-skills resolves these at activation time from
+  # $HOME, so the bundle path has to match its own target dests — the keys are
+  # therefore also the set of enabled targets.
   targetDest = {
     agents = ".agents/skills";
     claude = ".claude/skills";
@@ -52,21 +47,14 @@ in
       enable = true;
       sources = skillConfig;
       skills.enableAll = true;
-      targets = lib.genAttrs enabledTargets (_: {
+      targets = lib.genAttrs (lib.attrNames targetDest) (_: {
         enable = true;
       });
     };
 
-    agent.runtimeFiles =
-      lib.mapAttrs'
-        (name: path: {
-          name = targetDest.${name};
-          value = path;
-        })
-        (
-          lib.filterAttrs (
-            name: _: lib.elem name enabledTargets
-          ) config.programs.agent-skills.targetBundlePaths
-        );
+    agent.runtimeFiles = lib.mapAttrs' (name: path: {
+      name = targetDest.${name};
+      value = path;
+    }) (lib.filterAttrs (name: _: targetDest ? ${name}) config.programs.agent-skills.targetBundlePaths);
   };
 }

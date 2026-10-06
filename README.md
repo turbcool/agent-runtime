@@ -90,27 +90,32 @@ inputs.agent-runtime.homeModules.default;
 
 ## Providers
 
-`data/providers.nix` is the registry. Every entry is an OpenAI-compatible proxy;
-`anthropicUrl` exists for the Claude Code commands, which speak the Anthropic
-API instead, and `claudeModel` is that endpoint's model pair in the same dialect.
+`data/providers.nix` is the registry. Every entry is an OpenAI-compatible proxy
+with one URL; `claudeModel` is that endpoint's model pair in Claude Code's own
+dialect, which is served from the same base minus a trailing `/v1`.
 
-| Provider | Endpoint | Anthropic URL | Token env var | Models (context / max output) |
-|---|---|---|---|---|
-| `neoplatform` | `https://llm.neoplatform.ru` | — | `AGENT_NEOPLATFORM_TOKEN` | `deepseek-v4-flash` (200k/32k), `gemma-4-31b-it` (200k/32k), `qwen3-coder-128k:30b` (128k/32k) |
-| `custom` | `https://llm.naidanov.ru` | — | `AGENT_CUSTOM_TOKEN` | `deepseek-v4-flash` (200k/32k), `deepseek-v4-flash-direct` (200k/32k), `qwen3-coder-next` (128k/32k) |
-| `free` | `https://llm-free.naidanov.ru/v1` | `https://llm-free.naidanov.ru` | `AGENT_FREE_TOKEN` | `main` (256k/32k), `muse-spark-1.3-contributor` (defaults 128k/32k) |
+| Provider | Endpoint | Token env var | Models (context / max output) |
+|---|---|---|---|
+| `neoplatform` | `https://llm.neoplatform.ru` | `AGENT_NEOPLATFORM_TOKEN` | `deepseek-v4-flash` (200k/32k), `gemma-4-31b-it` (200k/32k), `qwen3-coder-128k:30b` (128k/32k) |
+| `custom` | `https://llm.naidanov.ru` | `AGENT_CUSTOM_TOKEN` | `deepseek-v4-flash` (200k/32k), `deepseek-v4-flash-direct` (200k/32k), `qwen3-coder-next` (128k/32k) |
+| `free` | `https://llm-free.naidanov.ru/v1` | `AGENT_FREE_TOKEN` | `main` (256k/32k), `muse-spark-1.3-contributor` (128k/32k) |
 
 A provider is:
 
 ```nix
 {
   url = "https://…";            # OpenAI-compatible base; "/v1" is normalised away
-  anthropicUrl = "https://…";   # optional, Claude Code commands only
   claudeModel = { main = "…"; small = "…"; };  # this endpoint's Claude Code tiers
   models.<id> = { name = "…"; limit.context = 200000; limit.output = 32000; };
   tokenSource = { env = "AGENT_X_TOKEN"; };   # the declaration; see below
 }
 ```
+
+Every model states its limits: pi reads them straight through and opencode
+copies them, so a missing one is a mistake rather than a default. `claudeModel`
+ids need not appear in `models` — they are the Anthropic endpoint's own names
+(`small` on the free endpoint is one), which is why only `agent.defaultModel` /
+`agent.smallModel` are asserted against the catalogue.
 
 Override the registry wholesale rather than patching the data file:
 
@@ -218,9 +223,10 @@ turbcool/nixos' `config/skills.nix`).
 | `agent.providers` | attrs | `data/providers.nix` | provider registry; on NixOS the NixOS module rewrites `agenixFiles` providers to store paths |
 | `agent.defaultModel` | str | `"free/main"` | `provider/model`; pi gets the two halves, opencode the joined string |
 | `agent.smallModel` | str | `"custom/qwen3-coder-next"` | small/subagent tier for pi *and* opencode — one line moves both |
-| `agent.mcp` | attrs | `data/mcp.nix` | MCP registry, in three sets: `servers`/`groups` (offered by the `mcp` command, which ships with the bundle) and `npm`, written into opencode.json *and* into each claude command's `--mcp-config` |
-| `agent.plugins` | attrs | `data/plugins.nix` | Claude Code marketplaces + enabled plugins (NixOS side) plus `opencodePlugins`, the repo names `modules/home.nix` loads into opencode.json |
+| `agent.mcp` | attrs | `data/mcp.nix` | MCP registry, in three sets: `servers`/`groups` (offered by the `mcp` command, which ships with the bundle) and `npm`, written into opencode.json *and* into each claude command's `--mcp-config`. The `mcp` command renders this same option, so an override reaches both |
+| `agent.plugins` | attrs | `data/plugins.nix` | Claude Code marketplaces + enabled plugins (NixOS side) plus `opencodePlugins`, the repo names `modules/home.nix` loads into opencode.json. All three are derived from one `community` list |
 | `agent.agents.includeTui` | bool | `true` | also install `agent-deck`; off for slim/headless bundles |
+| `agent.npmPrefix` | str | `"$HOME/.npm"` | where npm installs; its `bin/` holds the `npm` MCP servers, so this is the single source for their absolute paths, for `home.sessionPath` and for the activation hook that installs them |
 | `agent.claudeCode.enable` | bool | `true` | install the provider-pinned commands |
 | `agent.claudeCode.commands` | attrsOf `{ provider, script ? null }` | `claude`, `claude-free`, `writing` | one command per provider; the attr name is the command, `script` replaces the claude exec (see above) |
 
@@ -250,8 +256,9 @@ Also writes, without an option of its own:
   plugin install flow. Every *env* value lives in the per-provider command
   instead — a locked `CLAUDE_CODE_SUBAGENT_MODEL` here used to override the
   per-folder settings a `writing` run writes.
-- `environment.sessionVariables.ANTHROPIC_BASE_URL` for `commands.claude`'s
-  endpoint, so tools other than claude see the default one too.
+- `environment.sessionVariables` — nothing. The endpoint, the token and the
+  model tiers are all per-provider *process* state; publishing a base URL
+  globally only made pi think the built-in `anthropic` provider was live.
 
 ### Not an option: the pi package list
 
@@ -285,6 +292,11 @@ extension config under `~/.config/<ext>/`, and `.claude/settings.local.json` +
 `~/.cache/claude-code/mcp-<command>.json` (both written by the commands at
 `umask 077`/mode 0600, never from the store).
 
+One activation hook ships with the module: `installMcpServers` re-runs
+`npm i -g` for `agent.mcp.npm` when one of those binaries is missing, so a
+wiped `~/.npm` recovers by itself. It is the registry's own list, not a
+hand-copied one — a container still has no activation to run it.
+
 ## MCP servers
 
 `data/mcp.nix` is the registry, in three sets that stay separate on purpose:
@@ -309,7 +321,7 @@ A server that needs a binary nobody installs is dead weight — `mcp-nixos` come
 from `common/pkgs/dev.nix` on the host; add the package or drop the entry.
 
 `donsetch` and `bladebro` are not Nix packages — they are npm-installed per user
-(`npm i -g bladebro donsetch`) and need `programs.nix-ld` on NixOS.
+(the activation hook does it when missing) and need `programs.nix-ld` on NixOS.
 
 ## Claude Code plugins
 
@@ -329,9 +341,11 @@ nix develop                # jq, nixfmt, statix
 ```
 
 - The check is the contract for the bundle: `agent-runtime` must actually
-  contain `claude`, `claude-free`, `writing`, `opencode`, `pi`, `mcp`. Config
-  correctness is asserted by the modules themselves instead, so it is checked
-  for *every* consumer — not only for the defaults a flake check can see.
+  contain every `agent.claudeCode.commands` key plus `opencode`, `pi`, `mcp`.
+  The list is derived from the option, so adding a command covers itself.
+  Config correctness is asserted by the modules themselves instead, so it is
+  checked for *every* consumer — not only for the defaults a flake check can
+  see.
 - **No top-level `formatter` output.** Nix evaluates a `formatter` at system
   `«none»` here and `nix flake check` fails; format with the devshell's `nixfmt`
   (the old `nixfmt-rfc-style` alias).

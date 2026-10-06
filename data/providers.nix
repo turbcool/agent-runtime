@@ -1,13 +1,23 @@
 # Provider registry shared by claude-code, opencode and pi.
 #
+# `url` is the OpenAI-compatible base. Claude Code speaks the Anthropic API,
+# which is the same host minus a trailing `/v1` — modules/home.nix derives it,
+# so no provider carries a second URL.
+#
 # `tokenSource` has exactly one of:
 #   { env  = "VAR"; }   # default — works anywhere, including containers
 #   { file = "/path"; } # written by modules/nixos.nix to the agenix store path
 #
-# `claudeModel` is this endpoint's model pair in Claude Code's own dialect (it
-# speaks the Anthropic API, not the OpenAI-compatible one below). The
-# provider-pinned commands in `agent.claudeCode.commands` pick their tiers from
-# it, so a model id is named in exactly one place.
+# `claudeModel` is this endpoint's model pair in Claude Code's own dialect. Its
+# ids are the endpoint's, so they are not required to appear in `models` (which
+# is the OpenAI-compatible catalogue pi and opencode read) — `small` on the free
+# endpoint is one such id.
+#
+# The provider-pinned commands in `agent.claudeCode.commands` pick their tiers
+# from `claudeModel`, so a model id is named in exactly one place.
+#
+# Every entry in `models` states its limits: pi reads them directly and
+# opencode copies them through, and a missing limit is a mistake, not a default.
 #
 # The env form is the declaration; the NixOS module rewrites the tokenSource of
 # every provider listed in its `agent.agenixFiles` option into a store path and
@@ -60,13 +70,18 @@
   };
   free = {
     url = "https://llm-free.naidanov.ru/v1";
-    anthropicUrl = "https://llm-free.naidanov.ru";
     tokenSource.env = "AGENT_FREE_TOKEN";
     claudeModel = {
       main = "main";
       small = "small";
     };
-    models."muse-spark-1.3-contributor".name = "Muse Spark 1.3 Contributor";
+    models."muse-spark-1.3-contributor" = {
+      name = "Muse Spark 1.3 Contributor";
+      limit = {
+        context = 128000;
+        output = 32000;
+      };
+    };
     models."main".limit = {
       context = 256000;
       output = 32000;

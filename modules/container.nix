@@ -14,10 +14,8 @@
     username = lib.mkDefault "root";
     homeDirectory = lib.mkDefault "/root";
     stateVersion = lib.mkDefault "25.05";
-    sessionPath = [
-      "$HOME/.npm/bin"
-      "$HOME/.local/bin"
-    ];
+    # The runtime puts npmPrefix/bin on this itself; only the extras are ours.
+    sessionPath = [ "$HOME/.local/bin" ];
   };
 
   # No desktop shell: the container is entered with `nix develop` / a plain

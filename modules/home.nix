@@ -23,6 +23,13 @@ let
   llmAgents = runtimeInputs.llm-agents.packages.${system};
   realClaude = runtimeInputs.claude-code.packages.${system}.default;
 
+  # npm installs into $HOME/.npm on NixOS (programs.npm + /etc/npmrc), which is
+  # where the `npm` MCP servers' binaries live. One option, three uses: the two
+  # MCP renderers (as an absolute path), home.sessionPath (as a shell string, so
+  # a container gets it too) and the activation hook that installs them.
+  npmBin = "${cfg.npmPrefix}/bin";
+  npmBinPath = lib.replaceStrings [ "\$HOME" ] [ config.home.homeDirectory ] npmBin;
+
   # --- token resolution ---------------------------------------------------
   # One provider field (tokenSource) -> the three dialects each agent speaks.
   # `command` and `shell` are evaluated at request/launch time, so the token is
@@ -52,11 +59,12 @@ let
   # --- pi ------------------------------------------------------------------
   # pi names its model fields differently from opencode:
   # opencode's limit.context/limit.output are pi's contextWindow/maxTokens.
+  # Both are required — data/providers.nix states every model's limits.
   toPiModel = id: m: {
     inherit id;
     name = m.name or id;
-    contextWindow = (m.limit or { }).context or 128000;
-    maxTokens = (m.limit or { }).output or 32000;
+    contextWindow = m.limit.context;
+    maxTokens = m.limit.output;
   };
 
   # Every provider in data/providers.nix is an OpenAI-compatible proxy. Verified
@@ -163,7 +171,7 @@ let
           type = "local";
           # Absolute path: MCP servers inherit the agent's environment, which
           # may predate home.sessionPath (e.g. GUI-launched) — never rely on PATH.
-          command = [ "${config.home.homeDirectory}/.npm/bin/${srv.command}" ] ++ srv.args;
+          command = [ "${npmBinPath}/${srv.command}" ] ++ srv.args;
           enabled = true;
         }) cfg.mcp.npm;
       }
@@ -209,7 +217,7 @@ let
   claudeMcpConfig = pkgs.writeText "claude-code-mcp.json" (
     builtins.toJSON {
       mcpServers = lib.mapAttrs (
-        name: srv: srv // { command = "${config.home.homeDirectory}/.npm/bin/${srv.command}"; }
+        name: srv: srv // { command = "${npmBinPath}/${srv.command}"; }
       ) cfg.mcp.npm;
     }
   );
@@ -220,7 +228,9 @@ let
       p = providers.${c.provider};
     in
     ''
-      export ANTHROPIC_BASE_URL="${p.anthropicUrl or p.url}"
+      # Claude Code speaks the Anthropic API, which these endpoints serve from
+      # the OpenAI-compatible base minus the /v1 suffix.
+      export ANTHROPIC_BASE_URL="${lib.removeSuffix "/v1" p.url}"
       export ANTHROPIC_API_KEY=${tokenSyntax.${c.provider}.shell}
       export ANTHROPIC_DEFAULT_OPUS_MODEL="${p.claudeModel.main}"
       export ANTHROPIC_DEFAULT_SONNET_MODEL="${p.claudeModel.main}"
@@ -328,6 +338,12 @@ in
       description = "Also install agent-deck. Turn off for slim/headless bundles.";
     };
 
+    npmPrefix = lib.mkOption {
+      type = lib.types.str;
+      default = "$HOME/.npm";
+      description = "npm's prefix (NixOS-wiki home approach). Its bin/ holds the `mcp.npm` servers, so this is where their absolute paths come from.";
+    };
+
     runtimeFiles = lib.mkOption {
       type = lib.types.attrsOf lib.types.raw;
       default = { };
@@ -347,9 +363,30 @@ in
     agent.runtimeFiles = runtimeFiles;
     agent.runtimePackages = runtimePackages;
 
-    home.packages = config.agent.runtimePackages;
+    home = {
+      packages = config.agent.runtimePackages;
+      file = fileSpecs;
+      sessionPath = [ npmBin ];
 
-    home.file = fileSpecs;
+      # The npm-installed MCP servers are not Nix packages — they are binaries
+      # in npmPrefix/bin, so keep them present declaratively: a fresh machine,
+      # or a wiped $HOME/.npm, gets them back on the next activation instead of
+      # failing with "Executable not found in PATH". The list is the registry
+      # itself (agent.mcp.npm), so a new server needs no edit here.
+      activation.installMcpServers = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+        for cmd in ${
+          lib.concatStringsSep " " (
+            map (srv: "${npmBinPath}/${srv.command}") (builtins.attrValues cfg.mcp.npm)
+          )
+        }; do
+          [ -x "$cmd" ] || {
+            $DRY_RUN_CMD ${pkgs.nodejs}/bin/npm install --prefix "${cfg.npmPrefix}" -g \
+              ${lib.concatStringsSep " " (builtins.attrNames cfg.mcp.npm)}
+            break
+          }
+        done
+      '';
+    };
 
     # pi coding-agent — https://pi.dev
     assertions = [
@@ -358,6 +395,24 @@ in
         message = "agent.defaultModel must be \"provider/model\", got '${cfg.defaultModel}'";
       }
     ]
+    # agent.defaultModel / agent.smallModel are "provider/model": both halves
+    # must exist, or an agent silently falls back to its own defaults.
+    ++
+      map
+        (
+          ref:
+          let
+            parts = lib.splitString "/" ref;
+          in
+          {
+            assertion = providers ? ${lib.head parts} && providers.${lib.head parts}.models ? ${lib.last parts};
+            message = "agent.defaultModel/agent.smallModel: '${ref}' names no such model of that provider in data/providers.nix";
+          }
+        )
+        [
+          cfg.defaultModel
+          cfg.smallModel
+        ]
     ++ lib.mapAttrsToList (name: c: {
       assertion = providers ? ${c.provider} && providers.${c.provider} ? claudeModel;
       message = "agent.claudeCode.commands.${name} points at '${c.provider}', which has no claudeModel tiers in data/providers.nix";

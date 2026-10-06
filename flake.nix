@@ -70,13 +70,14 @@
       };
 
       # --- MCP ------------------------------------------------------------
-      # data/mcp.nix is the registry, but only its `npm` set reaches every
-      # agent (through the Home Manager module). The rest is opt-in per project
-      # via `mcp <group|server>`, which merges a rendered opencode.json fragment
-      # into the current folder. The configs are baked into a farm and shipped
-      # with the command, so activating one is a local file read — no `nix
-      # build`, and the same behaviour inside a container.
-      mcp = import ./data/mcp.nix;
+      # cfg.mcp is the registry (data/mcp.nix by default, overridable like every
+      # other agent option). Its `npm` set reaches every agent through the Home
+      # Manager module; the rest is opt-in per project via `mcp
+      # <group|server>`, which merges a rendered opencode.json fragment into the
+      # current folder. The configs are baked into a farm and shipped with the
+      # command, so activating one is a local file read — no `nix build`, and the
+      # same behaviour inside a container.
+      mcp = hmConfig.config.agent.mcp;
       toOpencodeMcp =
         srv:
         if srv ? url then
@@ -182,13 +183,24 @@
 
       # The contract the modules assert for every consumer, checked against the
       # bundle the container output ships: every agent must actually be in it.
+      # The command names come from the option, so adding one is covered here
+      # without editing this list.
       checks.${system}.bundle-contains-agents =
         pkgs.runCommand "bundle-contains-agents"
           {
             nativeBuildInputs = [ pkgs.coreutils ];
           }
           ''
-            for bin in claude claude-free writing opencode pi mcp; do
+            for bin in ${
+              lib.concatStringsSep " " (
+                builtins.attrNames hmConfig.config.agent.claudeCode.commands
+                ++ [
+                  "opencode"
+                  "pi"
+                  "mcp"
+                ]
+              )
+            }; do
               if [ ! -x "${agentRuntime}/bin/$bin" ]; then
                 echo "missing from bundle: $bin" >&2
                 exit 1

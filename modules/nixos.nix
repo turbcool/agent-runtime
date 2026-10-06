@@ -47,18 +47,16 @@ let
       p
   ) providers;
 
-  cc = cfg.claudeCode;
-  ccProvider = resolvedProviders.${cc.commands.claude.provider};
-
   # Declarative, immutable Claude Code config. Managed settings take the highest
   # precedence and cannot be overridden, freeing the user-scope
   # ~/.claude/settings.json to be a writable file that Claude's plugin install
   # flow can write to.
   #
-  # Only the plugin marketplaces live here. The env block is gone: every env
-  # value is either per-provider (the commands in modules/home.nix decide it) or
-  # host-agnostic, and a locked CLAUDE_CODE_SUBAGENT_MODEL used to override the
-  # per-folder settings a `writing` run writes.
+  # Plugins only. Every *env* value lives in the per-provider commands
+  # (modules/home.nix) instead: a locked CLAUDE_CODE_SUBAGENT_MODEL here used to
+  # override the per-folder settings a `writing` run writes, and a session-wide
+  # ANTHROPIC_BASE_URL here leaked the endpoint into every shell for no gain —
+  # the commands own their endpoint, and `commands.claude` is the default one.
   managedSettings = pkgs.writeText "claude-code-managed-settings.json" (
     builtins.toJSON {
       extraKnownMarketplaces = cfg.plugins.marketplaces;
@@ -102,9 +100,5 @@ in
     }) cfg.agenixFiles;
 
     environment.etc."claude-code/managed-settings.json".source = managedSettings;
-
-    environment.sessionVariables = lib.mkIf cc.enable {
-      ANTHROPIC_BASE_URL = ccProvider.anthropicUrl or ccProvider.url;
-    };
   };
 }
