@@ -38,8 +38,7 @@ nothing but the binaries and `AGENT_*_TOKEN` env vars.
 ### Container / standalone
 
 ```bash
-nix profile install github:turbcool/agent-runtime#agent-runtime             # pi, opencode, claude, claude-free, writing
-nix profile install github:turbcool/agent-runtime#agent-runtime-install     # one-shot: lay ~/.pi, ~/.config/opencode + skills into $HOME
+nix profile install github:turbcool/agent-runtime#agent-runtime             # pi, opencode, mcp, claude, claude-free, writing
 nix build github:turbcool/agent-runtime#agent-runtime-config                # rendered config + skill trees, for COPY in a Dockerfile
 nix develop github:turbcool/agent-runtime                                  # ad-hoc shell (jq, nixfmt, statix)
 ```
@@ -47,9 +46,9 @@ nix develop github:turbcool/agent-runtime                                  # ad-
 `#agent-runtime` is a `buildEnv` of `agent.runtimePackages` — deliberately not
 `home.packages`, because standalone HM folds its own baseline (man-db,
 mime-support) into that list. `#agent-runtime-config` is a `linkFarm` of
-`agent.runtimeFiles`; `#agent-runtime-install` `cp -rL`s it into `$HOME` and
-re-adds write permission (store paths are read-only, and pi must be able to
-create `~/.pi/agent/sessions`).
+`agent.runtimeFiles`; in a live container `cp -rL` it into `$HOME` and then
+`chmod -R u+w` (store paths are read-only, and pi must be able to create
+`~/.pi/agent/sessions`).
 
 Export `AGENT_NEOPLATFORM_TOKEN`, `AGENT_CUSTOM_TOKEN`, `AGENT_FREE_TOKEN`
 before running an agent.
@@ -78,22 +77,22 @@ Those tokens are then decrypted by agenix and every agent reads them from
 `/run/agenix/<name>-token` — never from an environment variable, never from a
 config file in the store.
 
-### Input wiring
+### Input wiring: none
 
-Skill sources name flake inputs (`input = "archify"`), and agent-skills resolves
-them against the **consuming** flake. So every input referenced by
-`data/skills.nix` must be declared by the consumer too, or point `follows` at
-the runtime's copy:
+Skill sources and opencode plugins are addressed by *absolute path* out of this
+flake's own lock (`data/skills.nix` takes a `runtimeInputs` argument closed over
+by `flake.nix`), not by flake-input name. A consumer therefore declares no
+inputs and writes no `follows` wiring for them — it just imports the module:
 
 ```nix
-inputs = { archify.follows = "agent-runtime/archify"; };
+inputs.agent-runtime.homeModules.default;
 ```
 
 ## Providers
 
 `data/providers.nix` is the registry. Every entry is an OpenAI-compatible proxy;
-`anthropicUrl` exists for the Claude Code wrappers, which speak the Anthropic
-API instead.
+`anthropicUrl` exists for the Claude Code commands, which speak the Anthropic
+API instead, and `claudeModel` is that endpoint's model pair in the same dialect.
 
 | Provider | Endpoint | Anthropic URL | Token env var | Models (context / max output) |
 |---|---|---|---|---|
@@ -106,7 +105,8 @@ A provider is:
 ```nix
 {
   url = "https://…";            # OpenAI-compatible base; "/v1" is normalised away
-  anthropicUrl = "https://…";   # optional, Claude Code wrappers only
+  anthropicUrl = "https://…";   # optional, Claude Code commands only
+  claudeModel = { main = "…"; small = "…"; };  # this endpoint's Claude Code tiers
   models.<id> = { name = "…"; limit.context = 200000; limit.output = 32000; };
   tokenSource = { env = "AGENT_X_TOKEN"; };   # the declaration; see below
 }
@@ -133,7 +133,7 @@ Home Manager receives through the consumer's bridge module.
 | resolved | `{ file = /run/agenix/free-token; }` | unchanged |
 | pi (`apiKey`) | `!cat /run/agenix/free-token` | `!printenv AGENT_FREE_TOKEN` |
 | opencode | `{file:/run/agenix/free-token}` | `{env:AGENT_FREE_TOKEN}` |
-| shell wrappers | `$(cat /run/agenix/free-token)` | `"$AGENT_FREE_TOKEN"` |
+| shell commands | `$(cat /run/agenix/free-token)` | `"$AGENT_FREE_TOKEN"` |
 
 Consequences worth keeping:
 
@@ -147,18 +147,33 @@ Consequences worth keeping:
   `<provider>-token` and gets `mode = "0400"`, chowned to
   `local.profile.username` when that option exists.
 
-### Claude Code wrappers
+### Provider-pinned commands
 
-`agent.claudeCode.provider` picks the endpoint for `claude`; each entry in
-`agent.claudeCode.wrappers` adds one more command (`claude-free` by default).
-Wrappers export `ANTHROPIC_*` for their own process and exec the real binary by
-absolute store path, so one binary serves several providers without a global
-shell export. `writing` is a one-shot per-project setup: it merges the `custom`
-provider into `./.claude/settings.local.json` (mode 0600) and prints the
-follow-up steps (plain bash in `data/scripts/writing.sh`, its environment
-injected from `modules/wrappers.nix`). `agent.claudeCode.exposeRealBinary`
-additionally puts the unwrapped `claude` on PATH — off by default, because it
-collides with the wrapper of the same name.
+`agent.claudeCode.commands` is an attrsOf record; the attr name is the command to
+install, and the record says which provider it talks to and what it runs
+afterwards:
+
+| Command | Provider | Runs |
+|---|---|---|
+| `claude` | `neoplatform` (also the default endpoint, see below) | the real claude, with the npm MCP servers |
+| `claude-free` | `free` | the same, repointed at the free endpoint with the free-account token |
+| `writing` | `custom` | `data/scripts/writing.sh` — merges the same env into `./.claude/settings.local.json` (mode 0600) and prints the follow-up steps |
+
+Each exports its provider's `ANTHROPIC_*` for its own process and therefore
+overrides any global shell export, so one binary serves several endpoints
+without global state. `writing` gets the identical env for free: its bash reads
+`ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` / the tier variables the record
+already rendered, which is why no model id is named twice.
+
+The real `claude` is reachable only through these commands (they exec it by
+absolute store path), so there is no option to put the unwrapped binary on PATH
+— it would collide with `claude`.
+
+To add a command:
+
+```nix
+agent.claudeCode.commands.claude-pro = { provider = "neoplatform"; };
+```
 
 ## Skills
 
@@ -187,7 +202,7 @@ only importer, and the module is a Nix *function*, so a second import makes ever
 `programs.agent-skills.*` option collide ("already declared").
 
 ```nix
-programs.agent-skills.sources.my-skill = { input = "my-repo"; subdir = "skills"; };
+programs.agent-skills.sources.my-skill = { path = "${myRepo}/skills"; };
 ```
 
 Two registries merge into one catalog on purpose: runtime skills above
@@ -202,24 +217,18 @@ turbcool/nixos' `config/skills.nix`).
 |---|---|---|---|
 | `agent.providers` | attrs | `data/providers.nix` | provider registry; on NixOS the NixOS module rewrites `agenixFiles` providers to store paths |
 | `agent.defaultModel` | str | `"free/main"` | `provider/model`; pi gets the two halves, opencode the joined string |
-| `agent.smallModel` | str | `"custom/qwen3-coder-next"` | small/subagent tier — one line moves it for pi *and* opencode |
-| `agent.mcp` | attrs | `data/mcp.nix` | MCP registry. Its `npm` set (the npm-installed servers) is written into opencode.json *and* handed to the Claude Code wrappers, each in its own dialect; the rest reaches opencode.json through the consumer's `mcp <group\|server>` CLI |
-| `agent.plugins` | attrs | `data/plugins.nix` | Claude Code marketplaces + enabled plugins; only NixOS consumes them (into managed-settings.json) |
-| `agent.skills.enable` | bool | `true` | declare the bundled skills |
-| `agent.agents.enable` | bool | `true` | put `pi` + `opencode` in `home.packages` |
+| `agent.smallModel` | str | `"custom/qwen3-coder-next"` | small/subagent tier for pi *and* opencode — one line moves both |
+| `agent.mcp` | attrs | `data/mcp.nix` | MCP registry, in three sets: `servers`/`groups` (offered by the `mcp` command, which ships with the bundle) and `npm`, written into opencode.json *and* into each claude command's `--mcp-config` |
+| `agent.plugins` | attrs | `data/plugins.nix` | Claude Code marketplaces + enabled plugins (NixOS side) plus `opencodePlugins`, the repo names `modules/home.nix` loads into opencode.json |
 | `agent.agents.includeTui` | bool | `true` | also install `agent-deck`; off for slim/headless bundles |
-| `agent.pi.enable` | bool | `true` | write `~/.pi/agent/{models,settings,pi-fff}.json` |
-| `agent.opencode.enable` | bool | `true` | write `~/.config/opencode/opencode.json` |
-| `agent.claudeCode.enable` | bool | `true` | build the `claude` wrappers + `writing` |
-| `agent.claudeCode.provider` | str | `"neoplatform"` | endpoint for `claude` |
-| `agent.claudeCode.mainModel` / `.smallModel` | str | `deepseek-v4-flash` / `qwen3-coder-128k:30b` | opus/sonnet and haiku tiers for `claude` |
-| `agent.claudeCode.exposeRealBinary` | bool | `false` | also put the unwrapped `claude` on PATH |
-| `agent.claudeCode.wrappers` | list of `{ name, provider, mainModel, smallModel, comment }` | one `claude-free` entry | one wrapper command per provider |
+| `agent.claudeCode.enable` | bool | `true` | install the provider-pinned commands |
+| `agent.claudeCode.commands` | attrsOf `{ provider, script ? null }` | `claude`, `claude-free`, `writing` | one command per provider; the attr name is the command, `script` replaces the claude exec (see above) |
 
-Internal: `agent.tokenSyntax`, `agent.runtimeFiles`, `agent.runtimePackages` —
-computed, read-only.
+Internal: `agent.runtimeFiles`, `agent.runtimePackages` — computed, read-only.
 
-`agent.agents.enable` also installs a `pi` wrapper that appends
+`agent.pi.enable`/`agent.opencode.enable`/`agents.enable`/`skills.enable` are
+gone: nothing flipped them, and the config files they guarded are the reason the
+bundle exists. What is left instead is a `pi` wrapper that appends
 `--exclude-tools web_crawl`: pi has no settings key for it (`defaultTools`
 cannot help, since sessions re-activate every extension tool), and the flag is
 the only thing that reaches pi's excluded-tool list. donsetch's `web_fetch` and
@@ -230,18 +239,19 @@ the only thing that reaches pi's excluded-tool list. donsetch's `web_fetch` and
 | Option | Type | Default | Effect |
 |---|---|---|---|
 | `agent.agenixFiles` | attrsOf path | `{}` | provider name → `.age` ciphertext; declares `age.secrets.<name>-token` (0400) and rewrites that provider's `tokenSource` to the store path |
-| `agent.claudeCode.{enable,provider,mainModel,smallModel}` | — | as above | declared once in `modules/options.nix` and imported by both halves |
+| `agent.claudeCode.{enable,commands}` | — | as above | declared once in `modules/options.nix` and imported by both halves |
 
 Also writes, without an option of its own:
 
 - `age.secrets.<provider>-token` for each entry in `agenixFiles`
-- `/etc/claude-code/managed-settings.json` — immutable Claude Code settings
-  (subagent model, auto-compact window, marketplaces, enabled plugins). Highest
-  precedence by design, which leaves the user-scope `~/.claude/settings.json`
-  writable for the plugin install flow. Provider-specific values
-  (`ANTHROPIC_BASE_URL`, the model tier map) are deliberately **not** here —
-  the per-provider wrappers own those.
-- `environment.sessionVariables.ANTHROPIC_BASE_URL` when Claude Code is enabled.
+- `/etc/claude-code/managed-settings.json` — the immutable Claude Code settings:
+  plugin marketplaces and enabled plugins, nothing else. Highest precedence by
+  design, which leaves the user-scope `~/.claude/settings.json` writable for the
+  plugin install flow. Every *env* value lives in the per-provider command
+  instead — a locked `CLAUDE_CODE_SUBAGENT_MODEL` here used to override the
+  per-folder settings a `writing` run writes.
+- `environment.sessionVariables.ANTHROPIC_BASE_URL` for `commands.claude`'s
+  endpoint, so tools other than claude see the default one too.
 
 ### Not an option: the pi package list
 
@@ -258,31 +268,45 @@ Managed (reverted on every activation):
 
 | Path | Written by | Note |
 |---|---|---|
-| `~/.pi/agent/models.json` | `agent.pi.enable` | providers + models, read-only for pi |
-| `~/.pi/agent/settings.json` | `agent.pi.enable` | force-managed: default provider/model, `enabledModels` (hides bundled models so `/model` and Ctrl+P only cycle ours), `packages` |
-| `~/.pi/agent/pi-fff.json` | `agent.pi.enable` | `@ff-labs/pi-fff` mode `override`: swaps pi's find/grep for `fffind`/`ffgrep`, adds `multi_grep` |
-| `~/.config/opencode/opencode.json` | `agent.opencode.enable` | force-managed: providers, models, permissions, compaction, ponytail/i-have-adhd plugins, and the two npm MCP servers with absolute paths. The remaining servers from `data/mcp.nix` are not written here — the consumer's `mcp <group|server>` CLI merges `#mcp-config-<name>` into this file |
-| `.agents/skills`, `.claude/skills`, `.config/opencode/skills` | `agent.skills.enable` | agent-skills symlink trees |
+| `~/.pi/agent/models.json` | `modules/home.nix` | providers + models, read-only for pi, so not force-managed |
+| `~/.pi/agent/settings.json` | `modules/home.nix` | force-managed: default provider/model, `enabledModels` (hides bundled models so `/model` and Ctrl+P only cycle ours), `packages` |
+| `~/.pi/agent/pi-fff.json` | `modules/home.nix` | `@ff-labs/pi-fff` mode `override`: swaps pi's find/grep for `fffind`/`ffgrep`, adds `multi_grep` |
+| `~/.config/opencode/opencode.json` | `modules/home.nix` | force-managed: providers, models, permissions, compaction, the `opencodePlugins` list, and the two npm MCP servers with absolute paths. The rest of `data/mcp.nix` is not written here — `mcp <group\|server>` merges it into the *project's* `opencode.json` |
+| `.agents/skills`, `.claude/skills`, `.config/opencode/skills` | `modules/skills.nix` | agent-skills symlink trees |
 | `/etc/claude-code/managed-settings.json` | NixOS | see above |
 | `/run/agenix/<provider>-token` | NixOS + agenix | 0400, decrypted at activation |
+
+The first four are one table (`fileSpecs`) that feeds both `home.file` and
+`runtimeFiles`, so the desktop login and the container bundle cannot drift.
 
 User-owned on purpose, so the agents' own write paths keep working: pi's
 `auth.json`, `sessions/`, `git/`, `npm/`, `zentui.json`, `~/.claude/settings.json`,
 extension config under `~/.config/<ext>/`, and `.claude/settings.local.json` +
-`~/.cache/claude-code/mcp-<wrapper>.json` (both written by wrappers at
+`~/.cache/claude-code/mcp-<command>.json` (both written by the commands at
 `umask 077`/mode 0600, never from the store).
 
 ## MCP servers
 
-`data/mcp.nix` is the registry: `nixos`, `daisyui`, `svelte`, `lucide-icons`,
-`wiki`, plus a `groups` view (`nixos`, `frontend`, `wiki`) and the reserved
-`npm` set — `donsetch` and `bladebro`, whose binaries are npm-installed into
-`~/.npm/bin`. Each ordinary server has an `enabled` flag. `npm` is declared once
-and derived twice: into opencode.json (`type = "local"`, absolute command path)
-and into each `claude` wrapper's `--mcp-config` (`type = "stdio"`). Both forms
-use absolute `$HOME/.npm/bin/…` paths, because a wrapper's environment can
-predate `home.sessionPath` (GUI launch, container without rc). A consumer
-enumerating servers must skip `groups` and `npm`.
+`data/mcp.nix` is the registry, in three sets that stay separate on purpose:
+
+| Set | What it is | How it reaches an agent |
+|---|---|---|
+| `servers` | `nixos`, `daisyui`, `svelte`, `lucide-icons` | opt-in per project: `mcp <server>` merges a rendered fragment into `./opencode.json` |
+| `groups` | `nixos`, `frontend` | the same, by name: `mcp frontend` |
+| `npm` | `donsetch`, `bladebro` (binaries in `~/.npm/bin`) | every agent, always: opencode.json + each claude command's `--mcp-config` |
+
+The `mcp` command ships with the bundle (`#mcp`, and inside `#agent-runtime`), so
+containers get it too. It reads its configs from a baked-in store farm, so
+activating a group is a local file read — no `nix build`, no flake reference.
+
+Entries are dialect-free: they say what a server *is*, and each renderer adds
+what its agent wants (opencode gets `type`/`enabled` and an absolute command
+path; Claude Code infers stdio from `command`). `npm` commands are absolute
+paths for both, because an agent's environment can predate `home.sessionPath`
+(GUI launch, container without rc).
+
+A server that needs a binary nobody installs is dead weight — `mcp-nixos` comes
+from `common/pkgs/dev.nix` on the host; add the package or drop the entry.
 
 `donsetch` and `bladebro` are not Nix packages — they are npm-installed per user
 (`npm i -g bladebro donsetch`) and need `programs.nix-ld` on NixOS.
@@ -292,8 +316,10 @@ enumerating servers must skip `groups` and `npm`.
 `data/plugins.nix` declares marketplaces (`claude-plugins-official`, `ponytail`,
 `i-have-adhd`, all auto-updating) and enabled plugins
 (`code-simplifier@claude-plugins-official`, `ponytail@ponytail`,
-`i-have-adhd@i-have-adhd`). `modules/home.nix` additionally loads the ponytail
-and i-have-adhd opencode plugins by absolute store path.
+`i-have-adhd@i-have-adhd`) — these are the immutable part of managed-settings.json.
+Its `opencodePlugins` list names the repos `modules/home.nix` loads into
+opencode.json as plugins, by absolute store path resolved from this flake's
+inputs.
 
 ## Checks, dev, gotchas
 
@@ -303,7 +329,7 @@ nix develop                # jq, nixfmt, statix
 ```
 
 - The check is the contract for the bundle: `agent-runtime` must actually
-  contain `claude`, `claude-free`, `writing`, `opencode`, `pi`. Config
+  contain `claude`, `claude-free`, `writing`, `opencode`, `pi`, `mcp`. Config
   correctness is asserted by the modules themselves instead, so it is checked
   for *every* consumer — not only for the defaults a flake check can see.
 - **No top-level `formatter` output.** Nix evaluates a `formatter` at system

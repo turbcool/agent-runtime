@@ -1,8 +1,8 @@
 # Skills that ship with the agent runtime.
 #
 # Host-only skills are declared in /etc/nixos/config/skills.nix and merged in
-# by common/hm/agent-skills.nix — `programs.agent-skills.sources` is a plain
-# attrsOf, so both modules contribute to one source set, one bundle and one
+# by common/hm/agent-skills.nix there — `programs.agent-skills.sources` is a
+# plain attrsOf, so both modules contribute to one source set, one bundle and one
 # sync, rather than fighting over them.
 #
 # On NixOS this module only declares the sources; agent-skills' own activation
@@ -10,16 +10,16 @@
 # activation to run, so the already-filtered per-target bundles are registered
 # in `agent.runtimeFiles` and end up in the `agent-runtime-config` package for
 # a container image to COPY into place.
+{ runtimeInputs }:
 {
   config,
-  inputs,
   lib,
   ...
 }:
 
 let
   cfg = config.agent;
-  skillConfig = import ../data/skills.nix;
+  skillConfig = import ../data/skills.nix { inherit runtimeInputs; };
 
   # `.agents/skills` is the cross-vendor convention that agents other than
   # opencode/claude read; it costs one symlink tree and means a new agent picks
@@ -45,9 +45,9 @@ in
   # every programs.agent-skills.* option fail with "already declared".
   # Modules that add host-specific sources must therefore only extend
   # `programs.agent-skills.sources`, never re-import the machinery.
-  imports = [ inputs.agent-skills.homeManagerModules.default ];
+  imports = [ runtimeInputs.agent-skills.homeManagerModules.default ];
 
-  config = lib.mkIf cfg.skills.enable {
+  config = {
     programs.agent-skills = {
       enable = true;
       sources = skillConfig;

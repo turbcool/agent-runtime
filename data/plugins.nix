@@ -1,3 +1,5 @@
+# Claude Code plugin marketplaces + enabled plugins. Only NixOS consumes them —
+# into the immutable managed-settings.json.
 {
   marketplaces = {
     claude-plugins-official = {
@@ -28,4 +30,12 @@
     "ponytail@ponytail" = true;
     "i-have-adhd@i-have-adhd" = true;
   };
+
+  # The same repos are also opencode plugins, loaded from .opencode/plugins/ by
+  # absolute store path (modules/home.nix). Declared here so the opencode side
+  # never hardcodes a path.
+  opencodePlugins = [
+    "ponytail"
+    "i-have-adhd"
+  ];
 }

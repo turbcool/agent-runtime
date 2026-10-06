@@ -1,14 +1,15 @@
-# Agent configuration for pi + opencode, and the shared option surface
-# (modules/options.nix).
+# Agent configuration for pi, opencode and the provider-pinned commands, plus
+# the remaining `agent.*` option surface (modules/options.nix).
 #
-# This module is evaluator-agnostic: it only needs `lib`, `pkgs`, `config` and
-# the flake inputs, so the exact same file runs under NixOS+Home Manager and
-# under the standalone homeManagerConfiguration in this flake's
-# `homeConfigurations` — which is what makes the container config identical to
-# the desktop config. Only the token source differs.
+# This module is evaluator-agnostic: it needs only `lib`, `pkgs`, `config` and
+# this flake's own inputs — the latter closed over as `runtimeInputs` by
+# flake.nix, never read from the consumer — so the exact same file runs under
+# NixOS+Home Manager and under the standalone homeManagerConfiguration in this
+# flake's `homeConfigurations`, which is what makes the container config
+# identical to the desktop config. Only the token source differs.
+{ runtimeInputs }:
 {
   config,
-  inputs,
   lib,
   pkgs,
   ...
@@ -19,7 +20,8 @@ let
   inherit (cfg) providers;
 
   inherit (pkgs.stdenv.hostPlatform) system;
-  llmAgents = inputs.llm-agents.packages.${system};
+  llmAgents = runtimeInputs.llm-agents.packages.${system};
+  realClaude = runtimeInputs.claude-code.packages.${system}.default;
 
   # --- token resolution ---------------------------------------------------
   # One provider field (tokenSource) -> the three dialects each agent speaks.
@@ -40,14 +42,12 @@ let
     else
       {
         # "$VAR" — expanded by the shell at launch time, so the key itself never
-        # appears in the wrapper script. (`\$` escapes the Nix interpolation.)
+        # appears in the command script. (`\$` escapes the Nix interpolation.)
         shell = "\"\$${ts.env}\"";
         command = "!printenv ${ts.env}";
         opencode = "{env:${ts.env}}";
       }
   ) providers;
-
-  cleanJson = lib.filterAttrsRecursive (_: v: v != null);
 
   # --- pi ------------------------------------------------------------------
   # pi names its model fields differently from opencode:
@@ -140,9 +140,9 @@ let
 
   # --- opencode ------------------------------------------------------------
   # cfg.mcp.npm is the npm-installed server set (data/mcp.nix); it is written
-  # here and handed to the Claude Code wrappers in modules/wrappers.nix, each in
-  # its own dialect. The other servers reach opencode.json through the
-  # consumer's `mcp <group|server>` CLI, which merges a per-server config in.
+  # here and handed to the provider-pinned commands below, each in its own
+  # dialect. The other servers reach opencode.json through the `mcp
+  # <group|server>` command, which merges a per-server config in.
   opencodeJson = pkgs.writeText "opencode.json" (
     builtins.toJSON (
       {
@@ -153,10 +153,9 @@ let
           lsp = "allow";
         };
         compaction.reserved = 16000;
-        plugin = [
-          "${inputs.ponytail}/.opencode/plugins/ponytail.mjs"
-          "${inputs.i-have-adhd}/.opencode/plugins/i-have-adhd.mjs"
-        ];
+        plugin = map (
+          name: "${runtimeInputs.${name}.outPath}/.opencode/plugins/${name}.mjs"
+        ) cfg.plugins.opencodePlugins;
         agent.explore.model = cfg.smallModel;
         mcp = lib.mapAttrs (name: srv: {
           type = "local";
@@ -170,7 +169,7 @@ let
         provider = lib.mapAttrs (name: p: {
           inherit name;
           npm = "@ai-sdk/openai-compatible";
-          models = cleanJson (p.models or { });
+          models = p.models or { };
           options = {
             baseURL = p.url;
             apiKey = tokenSyntax.${name}.opencode;
@@ -195,39 +194,118 @@ let
     makeWrapper ${llmAgents.pi}/bin/pi "$out/bin/pi" --add-flags "--exclude-tools web_crawl"
   '';
 
+  # --- provider-pinned commands -------------------------------------------
+  # `claude`, `claude-free`, `writing`: each exports one provider's ANTHROPIC_*
+  # env for its own process — overriding any global shell export — and then runs
+  # either the real claude (with the npm MCP servers, see below) or the script
+  # the record names. One binary, several endpoints, no global state.
+  #
+  # Claude Code MCP config, built from the same npm-installed set
+  # (data/mcp.nix) that opencode.json gets, in Claude Code's dialect (it infers
+  # stdio from `command`) and with absolute $HOME/.npm/bin paths. No secrets are
+  # resolved here; a server that needs one gets it from the command's env.
+  claudeMcpConfig = pkgs.writeText "claude-code-mcp.json" (
+    builtins.toJSON {
+      mcpServers = lib.mapAttrs (
+        name: srv: srv // { command = "${config.home.homeDirectory}/.npm/bin/${srv.command}"; }
+      ) cfg.mcp.npm;
+    }
+  );
+
+  mkCommand =
+    name: c:
+    let
+      p = providers.${c.provider};
+    in
+    ''
+      export ANTHROPIC_BASE_URL="${p.anthropicUrl or p.url}"
+      export ANTHROPIC_API_KEY=${tokenSyntax.${c.provider}.shell}
+      export ANTHROPIC_DEFAULT_OPUS_MODEL="${p.claudeModel.main}"
+      export ANTHROPIC_DEFAULT_SONNET_MODEL="${p.claudeModel.main}"
+      export ANTHROPIC_DEFAULT_HAIKU_MODEL="${p.claudeModel.small}"
+      export CLAUDE_CODE_SUBAGENT_MODEL="${p.claudeModel.small}"
+      export CLAUDE_CODE_AUTO_COMPACT_WINDOW="1000000"
+    ''
+    + (
+      if (c.script or null) != null then
+        # The bash lives in data/scripts/ (shellcheck-able, no Nix string
+        # escaping); only its environment comes from here.
+        ''
+          export JQ=${lib.escapeShellArg "${pkgs.jq}/bin/jq"}
+          exec bash ${c.script} "$@"
+        ''
+      else
+        # Non-strict --mcp-config, so it merges with ~/.claude.json and project
+        # .mcp.json servers, and `claude mcp add` keeps working.
+        ''
+          out="''${XDG_CACHE_HOME:-$HOME/.cache}/claude-code/mcp-${name}.json"
+          mkdir -p "$(dirname "$out")"
+          # umask governs creation; chmod also clamps a pre-existing file's mode.
+          ( umask 077; cat ${claudeMcpConfig} > "$out" )
+          chmod 600 "$out"
+          exec "${realClaude}/bin/claude" --mcp-config="$out" "$@"
+        ''
+    );
+
+  commands = lib.mapAttrsToList (name: c: pkgs.writeShellScriptBin name (mkCommand name c)) (
+    lib.optionalAttrs cfg.claudeCode.enable cfg.claudeCode.commands
+  );
+
   # Rendered config as store files, so the standalone container output can ship
   # them verbatim instead of re-implementing any of the rendering above.
   #
-  # Same trick for the binaries: `agent.runtimePackages` is what our modules
-  # contribute to home.packages, which keeps Home Manager's own baseline
-  # (man-db, shared-mime-info, the HM reference manpage) out of the container
-  # bundle while the two stay identical in content.
+  # One table, two consumers: `runtimeFiles` ships these paths in the
+  # `agent-runtime-config` package, `home.file` writes them into a desktop
+  # login — same paths, same sources, nothing to keep in sync by hand.
+  #
+  # Same trick for the binaries: `agent.runtimePackages` is what we contribute
+  # to home.packages, which keeps Home Manager's own baseline (man-db,
+  # shared-mime-info, the HM reference manpage) out of the container bundle
+  # while the two stay identical in content.
+  fileSpecs = {
+    # ~/.pi/agent/ is split deliberately. models.json is fully declarative here
+    # — pi only ever reads it — while settings.json is force-managed just like
+    # ~/.config/opencode/opencode.json, so changes made from pi's /settings are
+    # reverted on the next activation. auth.json, sessions/, git/ and npm/ stay
+    # user-owned so pi's own /login, pi install and session writes work.
+    ".pi/agent/models.json" = {
+      source = piModels;
+    };
+    ".pi/agent/settings.json" = {
+      source = piSettings;
+      force = true;
+    };
+    ".pi/agent/pi-fff.json" = {
+      source = piFff;
+      force = true;
+    };
+    ".config/opencode/opencode.json" = {
+      source = opencodeJson;
+      force = true;
+    };
+  };
+
+  runtimeFiles = lib.mapAttrs (_: spec: spec.source) fileSpecs;
+
   runtimePackages =
-    lib.optionals cfg.agents.enable [
+    commands
+    ++ [
       llmAgents.opencode
       piNoCrawl
     ]
     ++ lib.optionals cfg.agents.includeTui [ llmAgents.agent-deck ];
-
-  runtimeFiles = {
-    ".pi/agent/models.json" = piModels;
-    ".pi/agent/settings.json" = piSettings;
-    ".pi/agent/pi-fff.json" = piFff;
-    ".config/opencode/opencode.json" = opencodeJson;
-  };
 in
 {
   imports = [
     ./options.nix
-    ./skills.nix
-    ./wrappers.nix
+    (import ./skills.nix { inherit runtimeInputs; })
   ];
 
   options.agent = {
     mcp = lib.mkOption {
       type = lib.types.attrs;
       default = import ../data/mcp.nix;
-      description = "MCP server registry (data/mcp.nix). The `npm` key is the npm-installed set this module and modules/wrappers.nix share.";
+      description = "MCP registry (data/mcp.nix). `npm` is the npm-installed set this module ships to every agent; `servers`+`groups` are what the `mcp <group|server>` command offers.";
     };
 
     defaultModel = lib.mkOption {
@@ -239,76 +317,13 @@ in
     smallModel = lib.mkOption {
       type = lib.types.str;
       default = "custom/qwen3-coder-next";
-      description = "Small/subagent tier. Both pi and opencode read this, so one line moves both agents.";
+      description = "Small/subagent tier for pi and opencode. One line moves both agents.";
     };
 
-    skills.enable = lib.mkEnableOption "the bundled agent skills" // {
-      default = true;
-    };
-
-    agents = {
-      enable = lib.mkEnableOption "the agent binaries (pi, opencode) in home.packages" // {
-        default = true;
-      };
-      includeTui = lib.mkOption {
-        type = lib.types.bool;
-        default = true;
-        description = "Also install agent-deck. Turn off for slim/headless bundles.";
-      };
-    };
-
-    pi.enable = lib.mkEnableOption "pi configuration" // {
-      default = true;
-    };
-    opencode.enable = lib.mkEnableOption "opencode configuration" // {
-      default = true;
-    };
-
-    claudeCode.exposeRealBinary = lib.mkOption {
+    agents.includeTui = lib.mkOption {
       type = lib.types.bool;
-      default = false;
-      description = "Also put the unwrapped claude on PATH. Off by default: it would collide with the `claude` wrapper, and the wrapper already execs it by absolute store path.";
-    };
-
-    claudeCode.wrappers = lib.mkOption {
-      type = lib.types.listOf (
-        lib.types.submodule {
-          options = {
-            name = lib.mkOption { type = lib.types.str; };
-            provider = lib.mkOption { type = lib.types.str; };
-            mainModel = lib.mkOption { type = lib.types.str; };
-            smallModel = lib.mkOption { type = lib.types.str; };
-            comment = lib.mkOption {
-              type = lib.types.nullOr lib.types.str;
-              default = null;
-            };
-          };
-        }
-      );
-      default = [
-        {
-          name = "claude-free";
-          provider = "free";
-          mainModel = "main";
-          smallModel = "small";
-          comment = "Same claude, repointed at the free endpoint (llm-free.naidanov.ru) with the free-account token. Deliberately NOT claudeCode.mainModel/smallModel — those are the neoplatform defaults.";
-        }
-      ];
-    };
-
-    tokenSyntax = lib.mkOption {
-      type = lib.types.attrsOf (
-        lib.types.submodule {
-          options = {
-            shell = lib.mkOption { type = lib.types.str; };
-            command = lib.mkOption { type = lib.types.str; };
-            opencode = lib.mkOption { type = lib.types.str; };
-          };
-        }
-      );
-      default = { };
-      internal = true;
-      description = "Per-provider token, rendered in the dialect each agent expects. Read by modules/wrappers.nix.";
+      default = true;
+      description = "Also install agent-deck. Turn off for slim/headless bundles.";
     };
 
     runtimeFiles = lib.mkOption {
@@ -322,43 +337,17 @@ in
       type = lib.types.listOf lib.types.package;
       default = [ ];
       internal = true;
-      description = "Packages contributed by this module and modules/wrappers.nix. Mirrored into home.packages, and the sole content of this flake's `agent-runtime` package.";
+      description = "Packages contributed by this module. Mirrored into home.packages, and the bulk of this flake's `agent-runtime` package.";
     };
   };
 
   config = {
-    agent.tokenSyntax = tokenSyntax;
     agent.runtimeFiles = runtimeFiles;
     agent.runtimePackages = runtimePackages;
 
     home.packages = config.agent.runtimePackages;
 
-    # ~/.pi/agent/ is split deliberately. models.json is fully declarative here
-    # — pi only ever reads it — while settings.json is force-managed just like
-    # ~/.config/opencode/opencode.json, so changes made from pi's /settings are
-    # reverted on the next activation. auth.json, sessions/, git/ and npm/ stay
-    # user-owned so pi's own /login, pi install and session writes work.
-    home.file = lib.mkMerge [
-      (lib.optionalAttrs cfg.pi.enable {
-        ".pi/agent/models.json" = {
-          source = piModels;
-        };
-        ".pi/agent/settings.json" = {
-          source = piSettings;
-          force = true;
-        };
-        ".pi/agent/pi-fff.json" = {
-          source = piFff;
-          force = true;
-        };
-      })
-      (lib.optionalAttrs cfg.opencode.enable {
-        ".config/opencode/opencode.json" = {
-          source = opencodeJson;
-          force = true;
-        };
-      })
-    ];
+    home.file = fileSpecs;
 
     # pi coding-agent — https://pi.dev
     assertions = [
@@ -367,6 +356,10 @@ in
         message = "agent.defaultModel must be \"provider/model\", got '${cfg.defaultModel}'";
       }
     ]
+    ++ lib.mapAttrsToList (name: c: {
+      assertion = providers ? ${c.provider} && providers.${c.provider} ? claudeModel;
+      message = "agent.claudeCode.commands.${name} points at '${c.provider}', which has no claudeModel tiers in data/providers.nix";
+    }) cfg.claudeCode.commands
     ++ lib.mapAttrsToList (name: p: {
       assertion = p ? tokenSource && (p.tokenSource ? env || p.tokenSource ? file);
       message = "agent.providers.${name}.tokenSource must have `env` or `file`";

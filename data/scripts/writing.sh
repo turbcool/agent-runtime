@@ -8,15 +8,15 @@
 # The Codex MCP reviewer that the cross-model review skills want is a global,
 # one-time step — printed at the end, never run from here.
 #
-# Nix-injected environment: JQ, CUSTOM_URL, CUSTOM_TOKEN, MAIN_MODEL,
-# SMALL_MODEL (see modules/wrappers.nix). The defaults below keep the script
-# runnable by hand.
+# Nix-injected environment: JQ plus the ANTHROPIC_* env of the `writing`
+# command (modules/home.nix). The defaults below keep the script runnable by
+# hand.
 set -euo pipefail
 
 : "${JQ:=jq}"
-: "${CUSTOM_URL:=https://llm.naidanov.ru}"
-: "${MAIN_MODEL:=deepseek-v4-flash}"
-: "${SMALL_MODEL:=qwen3-coder-next}"
+: "${ANTHROPIC_BASE_URL:=https://llm.naidanov.ru}"
+: "${ANTHROPIC_DEFAULT_SONNET_MODEL:=deepseek-v4-flash}"
+: "${ANTHROPIC_DEFAULT_HAIKU_MODEL:=qwen3-coder-next}"
 
 REPO="${ARIS_REPO:-$HOME/aris_repo}"
 URL="https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep.git"
@@ -55,25 +55,22 @@ echo "› $(ls -1 "$skills_dir" | wc -l | tr -d ' ') skill(s) linked into $skill
 
 # 3. Repoint Claude Code at the custom provider for THIS folder only, by
 #    merging an env block into .claude/settings.local.json. That file sits below
-#    the immutable managed-settings.json but ABOVE the global exports from
-#    .zshrc, so it cleanly overrides ANTHROPIC_BASE_URL, the token (both
-#    AUTH_TOKEN and API_KEY, so Claude's auth-precedence can't pick a stale
-#    value) and the model tiers. jq merges so existing keys (permissions, …)
-#    survive; the token is read fresh and the file is written mode-0600.
-#    NOTE: managed-settings.json locks CLAUDE_CODE_SUBAGENT_MODEL
-#    system-wide, so subagents keep the global model — change
-#    agent.claudeCode.smallModel in the host's HM config if the custom endpoint
-#    rejects the global id.
+#    the immutable managed-settings.json but ABOVE the global session env, so it
+#    cleanly overrides ANTHROPIC_BASE_URL, the token (both AUTH_TOKEN and
+#    API_KEY, so Claude's auth-precedence can't pick a stale value) and the model
+#    tiers. jq merges so existing keys (permissions, …) survive; the token is
+#    read fresh and the file is written mode-0600.
 sfile="$PWD/.claude/settings.local.json"
 mkdir -p "$PWD/.claude"
-if [ -z "${CUSTOM_TOKEN:-}" ]; then
-  echo "✗ Custom provider token unavailable (${CUSTOM_TOKEN_SOURCE:-AGENT_CUSTOM_TOKEN})"
-  echo "  Export it, or provision the agenix 'custom-token' secret on NixOS, then re-run 'writing'."
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "✗ Custom provider token unavailable (ANTHROPIC_API_KEY is empty)"
+  echo "  Provision the agenix 'custom-token' secret on NixOS, then re-run 'writing'."
   exit 1
 fi
 base="$(cat "$sfile" 2>/dev/null || echo '{}')"
 "$JQ" -e . >/dev/null 2>&1 <<<"$base" || base='{}'
-merged="$("$JQ" --arg url "$CUSTOM_URL" --arg key "$CUSTOM_TOKEN" --arg m "$MAIN_MODEL" --arg h "$SMALL_MODEL" \
+merged="$("$JQ" --arg url "$ANTHROPIC_BASE_URL" --arg key "$ANTHROPIC_API_KEY" \
+  --arg m "$ANTHROPIC_DEFAULT_SONNET_MODEL" --arg h "$ANTHROPIC_DEFAULT_HAIKU_MODEL" \
   '.env = ((.env // {}) + {
      "ANTHROPIC_BASE_URL": $url,
      "ANTHROPIC_AUTH_TOKEN": $key,
@@ -84,12 +81,12 @@ merged="$("$JQ" --arg url "$CUSTOM_URL" --arg key "$CUSTOM_TOKEN" --arg m "$MAIN
    })' <<<"$base")"
 ( umask 077; printf '%s\n' "$merged" > "$sfile" )
 chmod 600 "$sfile" # umask only governs creation; clamp a pre-existing file too
-echo "› Claude → custom provider ($CUSTOM_URL, opus/sonnet=$MAIN_MODEL, haiku=$SMALL_MODEL) via $sfile"
+echo "› Claude → custom provider via $sfile (sonnet/opus=$ANTHROPIC_DEFAULT_SONNET_MODEL, haiku=$ANTHROPIC_DEFAULT_HAIKU_MODEL)"
 
 # 4. Cross-model review skills need the Codex MCP reviewer — a global,
 #    one-time step. Print it; don't mutate ~/.claude.json from here.
 echo ""
-echo "✅ ARIS ready in this folder (Claude → $CUSTOM_URL). Next: run  claude"
+echo "✅ ARIS ready in this folder (Claude → $ANTHROPIC_BASE_URL). Next: run  claude"
 echo "   then try a workflow, e.g.:"
 echo '     /research-pipeline "your research direction"'
 echo '     /paper-writing "NARRATIVE_REPORT.md"'

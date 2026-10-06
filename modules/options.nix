@@ -22,27 +22,51 @@
     plugins = lib.mkOption {
       type = lib.types.attrs;
       default = import ../data/plugins.nix;
-      description = "Claude Code plugin marketplaces + enabled plugins (data/plugins.nix). Only NixOS consumes them — into the immutable managed-settings.json.";
+      description = "Claude Code plugin marketplaces + enabled plugins (data/plugins.nix), plus the `opencodePlugins` list loaded into opencode.json. NixOS consumes the first two — into the immutable managed-settings.json.";
     };
 
     claudeCode = {
       enable = lib.mkEnableOption "Claude Code integration" // {
         default = true;
       };
-      provider = lib.mkOption {
-        type = lib.types.str;
-        default = "neoplatform";
-        description = "Provider the default `claude` wrapper talks to.";
-      };
-      mainModel = lib.mkOption {
-        type = lib.types.str;
-        default = "deepseek-v4-flash";
-        description = "Opus/Sonnet tier for `claude`, and the subagent model in managed-settings.json.";
-      };
-      smallModel = lib.mkOption {
-        type = lib.types.str;
-        default = "qwen3-coder-128k:30b";
-        description = "Haiku tier for `claude`.";
+      commands = lib.mkOption {
+        type = lib.types.attrsOf (
+          lib.types.submodule {
+            options = {
+              provider = lib.mkOption {
+                type = lib.types.str;
+                description = "Provider this command talks to; its `url`/`anthropicUrl` and `claudeModel` tiers do the rest.";
+              };
+              script = lib.mkOption {
+                type = lib.types.nullOr lib.types.path;
+                default = null;
+                description = "Run this bash script instead of claude, with the same ANTHROPIC_* env already exported (data/scripts/writing.sh).";
+              };
+            };
+          }
+        );
+        default = {
+          # The default endpoint: also what environment.sessionVariables
+          # publishes as ANTHROPIC_BASE_URL on NixOS.
+          claude = {
+            provider = "neoplatform";
+          };
+          claude-free = {
+            provider = "free";
+          };
+          # Per-folder setup instead of a one-shot claude run: it persists the
+          # same env into ./.claude/settings.local.json, then exits.
+          writing = {
+            provider = "custom";
+            script = ../data/scripts/writing.sh;
+          };
+        };
+        description = ''
+          Provider-pinned commands, keyed by the command name to install. Each
+          exports its provider's ANTHROPIC_* env for its own process only —
+          overriding whatever the shell exports — and then execs claude, or the
+          `script` when one is given.
+        '';
       };
     };
   };

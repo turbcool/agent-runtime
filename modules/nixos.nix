@@ -8,6 +8,11 @@
 # container resolves them from the environment — same module, same rendered
 # config, different token source.
 #
+# Everything a per-provider command can decide for itself (base URL, token, the
+# model tiers, the compact window) is deliberately NOT here: managed settings
+# cannot be overridden, which would defeat those commands. What stays is what
+# only the host can declare — the plugin marketplaces, which claude downloads.
+#
 # The ciphertexts live on the host, not here: this flake ships no secrets and
 # no absolute paths, so a container install is a plain `nix profile install`.
 {
@@ -43,24 +48,19 @@ let
   ) providers;
 
   cc = cfg.claudeCode;
-  ccProvider = resolvedProviders.${cc.provider};
+  ccProvider = resolvedProviders.${cc.commands.claude.provider};
 
   # Declarative, immutable Claude Code config. Managed settings take the highest
   # precedence and cannot be overridden, freeing the user-scope
   # ~/.claude/settings.json to be a writable file that Claude's plugin install
   # flow can write to.
   #
-  # Only host-agnostic knobs live here. Anything provider-specific
-  # (ANTHROPIC_BASE_URL, the ANTHROPIC_DEFAULT_*_MODEL tier map) must NOT be set
-  # here — otherwise the per-provider wrappers in modules/wrappers.nix couldn't
-  # repoint the agents at a different endpoint. Interactive `claude` still gets
-  # those from the wrappers and from the consumer's own shell config.
+  # Only the plugin marketplaces live here. The env block is gone: every env
+  # value is either per-provider (the commands in modules/home.nix decide it) or
+  # host-agnostic, and a locked CLAUDE_CODE_SUBAGENT_MODEL used to override the
+  # per-folder settings a `writing` run writes.
   managedSettings = pkgs.writeText "claude-code-managed-settings.json" (
     builtins.toJSON {
-      env = {
-        CLAUDE_CODE_SUBAGENT_MODEL = cc.smallModel;
-        CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000";
-      };
       extraKnownMarketplaces = cfg.plugins.marketplaces;
       enabledPlugins = cfg.plugins.plugins;
     }
