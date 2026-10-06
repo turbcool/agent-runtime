@@ -1,11 +1,11 @@
-# Agent configuration for pi + opencode, and the option surface shared with
-# modules/nixos.nix (agenix secrets, managed Claude Code settings).
+# Agent configuration for pi + opencode, and the shared option surface
+# (modules/options.nix).
 #
 # This module is evaluator-agnostic: it only needs `lib`, `pkgs`, `config` and
-# the flake inputs, so the exact same file runs under NixOS+Home Manager (where
-# common/hm/agent-bridge.nix feeds it agenix-resolved providers) and under the
-# standalone homeManagerConfiguration in this flake's `homeConfigurations`
-# (where the data/providers.nix defaults — env-var tokens — are used verbatim).
+# the flake inputs, so the exact same file runs under NixOS+Home Manager and
+# under the standalone homeManagerConfiguration in this flake's
+# `homeConfigurations` — which is what makes the container config identical to
+# the desktop config. Only the token source differs.
 {
   config,
   inputs,
@@ -99,32 +99,18 @@ let
       # enough — no activation hook needed. A network-less container therefore
       # needs its npm packages pre-seeded or it fails on first boot.
       #
-      # pi-zentui — full TUI skin (Editor, user messages, thinking, working
-      # line, Starship-style Footer, extension statuses). Replaces
-      # @narumitw/pi-starship, whose Starship footer it subsumes.
-      # Config lives in ~/.pi/agent/zentui.json and is written by pi's /zentui
-      # command, so it stays user-owned like auth.json — force-managing it here
-      # would revert every /zentui change on the next activation.
-      # Note: its Thinking (Experimental) renderer is tested against pi 0.85.0
-      # and 0.87.1 and may misbehave on pi 1.x. It is disabled by default.
-      # donsetch — web_fetch/search/crawl/screenshot as native tools. The
-      # github.com/dondai44423/donsetch README suggests a git: source, but the
-      # pi entry point is the npm package (`pi.extensions` = ./pi-extension.ts).
-      # Its prebuilt Rust binary is glibc, which programs.nix-ld
-      # (common/modules/nix-ld.nix) already covers on NixOS.
-      # @ff-labs/pi-fff — Rust/SIMD FFF file+content search, replacing the
-      # built-in find/grep; mode config in data/pi-fff.json below. Its two native
-      # layers (@ff-labs/fff-node via ffi-rs) ship per-platform prebuilds, and the
-      # linux-x64-gnu ones match this host, so nothing is compiled here.
-      # @piex-dev/init — /init prompt template that writes or improves the repo's
-      # AGENTS.md. Prompt-only (`pi.prompts`), no extension and no tools, so it
-      # costs nothing per request; pi already auto-loads AGENTS.md from the cwd
-      # and its parents, so this only keeps that file honest.
+      # pi-zentui — full TUI skin, supersedes @narumitw/pi-starship. Its config
+      # (~/.pi/agent/zentui.json) is written by pi's /zentui, so it stays
+      # user-owned like auth.json. Its Thinking (Experimental) renderer is tested
+      # against pi 0.85/0.87 and may misbehave on pi 1.x — disabled by default.
+      # donsetch — web_fetch/search/crawl/screenshot as native tools. Its
+      # prebuilt Rust binary is glibc, which programs.nix-ld covers on NixOS.
+      # @ff-labs/pi-fff — Rust/SIMD FFF search replacing pi's find/grep; mode
+      # config below. linux-x64-gnu prebuilds match, nothing is compiled here.
+      # @piex-dev/init — /init prompt template that writes the repo's AGENTS.md.
+      # Prompt-only, so it costs nothing per request.
       # @juicesharp/rpiv-ask-user-question — one tool, ask_user_question: a
-      # tabbed terminal dialog of up to 4 typed-option questions instead of the
-      # model guessing. No config written (defaults are fine; the optional
-      # ~/.config/rpiv-ask-user-question/config.json is user-owned, like
-      # zentui.json). Self-removes from the tool list in non-interactive runs.
+      # tabbed dialog of up to 4 typed-option questions. No config written.
       packages = [
         "npm:pi-zentui"
         "npm:donsetch"
@@ -153,6 +139,10 @@ let
   );
 
   # --- opencode ------------------------------------------------------------
+  # cfg.mcp.npm is the npm-installed server set (data/mcp.nix); it is written
+  # here and handed to the Claude Code wrappers in modules/wrappers.nix, each in
+  # its own dialect. The other servers reach opencode.json through the
+  # consumer's `mcp <group|server>` CLI, which merges a per-server config in.
   opencodeJson = pkgs.writeText "opencode.json" (
     builtins.toJSON (
       {
@@ -162,35 +152,19 @@ let
           websearch = "allow";
           lsp = "allow";
         };
-        compaction = {
-          auto = true;
-          prune = true;
-          reserved = 16000;
-        };
-        disabled_providers = [ ];
+        compaction.reserved = 16000;
         plugin = [
           "${inputs.ponytail}/.opencode/plugins/ponytail.mjs"
           "${inputs.i-have-adhd}/.opencode/plugins/i-have-adhd.mjs"
         ];
         agent.explore.model = cfg.smallModel;
-        # Absolute paths: MCP servers inherit the agent's environment, which
-        # may predate home.sessionPath (e.g. GUI-launched) — never rely on PATH.
-        mcp.donsetch = {
+        mcp = lib.mapAttrs (name: srv: {
           type = "local";
-          command = [
-            "${config.home.homeDirectory}/.npm/bin/donsetch"
-            "mcp"
-          ];
+          # Absolute path: MCP servers inherit the agent's environment, which
+          # may predate home.sessionPath (e.g. GUI-launched) — never rely on PATH.
+          command = [ "${config.home.homeDirectory}/.npm/bin/${srv.command}" ] ++ srv.args;
           enabled = true;
-        };
-        mcp.bladebro = {
-          type = "local";
-          command = [
-            "${config.home.homeDirectory}/.npm/bin/bladebro"
-            "mcp"
-          ];
-          enabled = true;
-        };
+        }) cfg.mcp.npm;
       }
       // {
         provider = lib.mapAttrs (name: p: {
@@ -203,7 +177,7 @@ let
           };
         }) providers;
       }
-      // lib.optionalAttrs (cfg.defaultModel != null) {
+      // {
         model = cfg.defaultModel;
         small_model = cfg.smallModel;
       }
@@ -243,27 +217,21 @@ let
   };
 in
 {
+  imports = [
+    ./options.nix
+    ./skills.nix
+    ./wrappers.nix
+  ];
+
   options.agent = {
-    providers = lib.mkOption {
-      type = lib.types.attrs;
-      default = import ../data/providers.nix;
-      description = "Provider registry. NixOS replaces the tokenSource of every provider that has an `agenixFile` with an agenix store path (see modules/nixos.nix).";
-    };
-
-    plugins = lib.mkOption {
-      type = lib.types.attrs;
-      default = import ../data/plugins.nix;
-      description = "Claude Code plugin marketplaces + enabled plugins (data/plugins.nix).";
-    };
-
     mcp = lib.mkOption {
       type = lib.types.attrs;
-      default = import ../data/mcp.nix { inherit pkgs; };
-      description = "MCP server registry (data/mcp.nix).";
+      default = import ../data/mcp.nix;
+      description = "MCP server registry (data/mcp.nix). The `npm` key is the npm-installed set this module and modules/wrappers.nix share.";
     };
 
     defaultModel = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
+      type = lib.types.str;
       default = "free/main";
       description = "opencode's `provider/model` form. pi splits it apart.";
     };
@@ -296,52 +264,36 @@ in
       default = true;
     };
 
-    claudeCode = {
-      enable = lib.mkEnableOption "Claude Code integration" // {
-        default = true;
-      };
-      provider = lib.mkOption {
-        type = lib.types.str;
-        default = "neoplatform";
-      };
-      mainModel = lib.mkOption {
-        type = lib.types.str;
-        default = "deepseek-v4-flash";
-      };
-      smallModel = lib.mkOption {
-        type = lib.types.str;
-        default = "qwen3-coder-128k:30b";
-      };
-      exposeRealBinary = lib.mkOption {
-        type = lib.types.bool;
-        default = false;
-        description = "Also put the unwrapped claude on PATH. Off by default: it would collide with the `claude` wrapper, and the wrapper already execs it by absolute store path.";
-      };
-      wrappers = lib.mkOption {
-        type = lib.types.listOf (
-          lib.types.submodule {
-            options = {
-              name = lib.mkOption { type = lib.types.str; };
-              provider = lib.mkOption { type = lib.types.str; };
-              mainModel = lib.mkOption { type = lib.types.str; };
-              smallModel = lib.mkOption { type = lib.types.str; };
-              comment = lib.mkOption {
-                type = lib.types.nullOr lib.types.str;
-                default = null;
-              };
+    claudeCode.exposeRealBinary = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Also put the unwrapped claude on PATH. Off by default: it would collide with the `claude` wrapper, and the wrapper already execs it by absolute store path.";
+    };
+
+    claudeCode.wrappers = lib.mkOption {
+      type = lib.types.listOf (
+        lib.types.submodule {
+          options = {
+            name = lib.mkOption { type = lib.types.str; };
+            provider = lib.mkOption { type = lib.types.str; };
+            mainModel = lib.mkOption { type = lib.types.str; };
+            smallModel = lib.mkOption { type = lib.types.str; };
+            comment = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
             };
-          }
-        );
-        default = [
-          {
-            name = "claude-free";
-            provider = "free";
-            mainModel = "main";
-            smallModel = "small";
-            comment = "Same claude, repointed at the free endpoint (llm-free.naidanov.ru) with the free-account token. Deliberately NOT claudeCode.mainModel/smallModel — those are the neoplatform defaults.";
-          }
-        ];
-      };
+          };
+        }
+      );
+      default = [
+        {
+          name = "claude-free";
+          provider = "free";
+          mainModel = "main";
+          smallModel = "small";
+          comment = "Same claude, repointed at the free endpoint (llm-free.naidanov.ru) with the free-account token. Deliberately NOT claudeCode.mainModel/smallModel — those are the neoplatform defaults.";
+        }
+      ];
     };
 
     tokenSyntax = lib.mkOption {
@@ -420,9 +372,4 @@ in
       message = "agent.providers.${name}.tokenSource must have `env` or `file`";
     }) providers;
   };
-
-  imports = [
-    ./skills.nix
-    ./wrappers.nix
-  ];
 }

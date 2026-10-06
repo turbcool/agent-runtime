@@ -54,32 +54,22 @@ let
   # (ANTHROPIC_BASE_URL, the ANTHROPIC_DEFAULT_*_MODEL tier map) must NOT be set
   # here — otherwise the per-provider wrappers in modules/wrappers.nix couldn't
   # repoint the agents at a different endpoint. Interactive `claude` still gets
-  # those from the wrappers and from common/hm/claude-code.nix.
+  # those from the wrappers and from the consumer's own shell config.
   managedSettings = pkgs.writeText "claude-code-managed-settings.json" (
-    builtins.toJSON (
-      {
-        env = {
-          CLAUDE_CODE_SUBAGENT_MODEL = cc.smallModel;
-          CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000";
-        };
-      }
-      // (lib.optionalAttrs (cfg.plugins.marketplaces != { }) {
-        extraKnownMarketplaces = cfg.plugins.marketplaces;
-      })
-      // (lib.optionalAttrs (cfg.plugins.plugins != { }) {
-        enabledPlugins = cfg.plugins.plugins;
-      })
-    )
+    builtins.toJSON {
+      env = {
+        CLAUDE_CODE_SUBAGENT_MODEL = cc.smallModel;
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000";
+      };
+      extraKnownMarketplaces = cfg.plugins.marketplaces;
+      enabledPlugins = cfg.plugins.plugins;
+    }
   );
 in
 {
-  options.agent = {
-    providers = lib.mkOption {
-      type = lib.types.attrs;
-      default = import ../data/providers.nix;
-      description = "Provider registry (data/providers.nix), as declared. Prefer reading `agent.resolvedProviders`, which is this set with every agenix-backed tokenSource rewritten to a store path.";
-    };
+  imports = [ ./options.nix ];
 
+  options.agent = {
     resolvedProviders = lib.mkOption {
       type = lib.types.attrs;
       default = { };
@@ -90,36 +80,13 @@ in
     agenixFiles = lib.mkOption {
       type = lib.types.attrsOf lib.types.path;
       default = { };
-      example = "{ neoplatform = ../common/secrets/neoplatform-token.age; }";
+      example = "{ neoplatform = ../secrets/neoplatform-token.age; }";
       description = ''
         agenix ciphertext per provider name. NixOS-only — a container has no
         age identity and resolves `tokenSource.env` instead. Providers left out
         keep their env-var tokenSource, i.e. the token is read from the
         environment on NixOS too.
       '';
-    };
-
-    plugins = lib.mkOption {
-      type = lib.types.attrs;
-      default = import ../data/plugins.nix;
-    };
-
-    claudeCode = {
-      enable = lib.mkEnableOption "Claude Code integration" // {
-        default = true;
-      };
-      provider = lib.mkOption {
-        type = lib.types.str;
-        default = "neoplatform";
-      };
-      mainModel = lib.mkOption {
-        type = lib.types.str;
-        default = "deepseek-v4-flash";
-      };
-      smallModel = lib.mkOption {
-        type = lib.types.str;
-        default = "qwen3-coder-128k:30b";
-      };
     };
   };
 
@@ -133,17 +100,6 @@ in
         mode = "0400";
       };
     }) cfg.agenixFiles;
-
-    assertions = [
-      {
-        assertion = !cc.enable || resolvedProviders.${cc.provider} ? tokenSource;
-        message = "agent.providers.${cc.provider} has no tokenSource";
-      }
-    ]
-    ++ lib.mapAttrsToList (name: p: {
-      assertion = p ? tokenSource && (p.tokenSource ? env || p.tokenSource ? file);
-      message = "agent.providers.${name}.tokenSource must have `env` or `file`";
-    }) providers;
 
     environment.etc."claude-code/managed-settings.json".source = managedSettings;
 

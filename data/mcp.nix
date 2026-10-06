@@ -1,5 +1,11 @@
-{ pkgs }:
-
+# MCP server registry. Read by modules/home.nix (opencode.json + the Claude Code
+# wrappers) and by the consumer's `mcp` CLI, which renders one `mcp-config-<name>`
+# package per server and merges it into the user's opencode.json.
+#
+# `npm` is the npm-installed set: binaries that live in $HOME/.npm/bin and are
+# exposed to every agent. Both agents rewrite them to an absolute path (an
+# agent's environment may predate home.sessionPath — GUI launch, container
+# without rc). Consumers skip this key when they enumerate servers.
 {
   nixos = {
     type = "local";
@@ -41,35 +47,7 @@
     enabled = true;
   };
 
-  donsetch = {
-    type = "local";
-    command = [
-      "donsetch"
-      "mcp"
-    ];
-    enabled = true;
-  };
-
-  bladebro = {
-    type = "local";
-    command = [
-      "bladebro"
-      "mcp"
-    ];
-    enabled = true;
-  };
-
-  groups = {
-    nixos = [ "nixos" ];
-    frontend = [
-      "svelte"
-      "daisyui"
-      "lucide-icons"
-    ];
-    wiki = [ "wiki" ];
-  };
-
-  claudeCode = {
+  npm = {
     donsetch = {
       type = "stdio";
       command = "donsetch";
@@ -80,5 +58,15 @@
       command = "bladebro";
       args = [ "mcp" ];
     };
+  };
+
+  groups = {
+    nixos = [ "nixos" ];
+    frontend = [
+      "svelte"
+      "daisyui"
+      "lucide-icons"
+    ];
+    wiki = [ "wiki" ];
   };
 }

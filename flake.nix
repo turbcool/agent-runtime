@@ -65,20 +65,13 @@
       };
 
       # Everything modules/home.nix + modules/wrappers.nix contribute, i.e. pi,
-      # opencode, claude, claude-free, writing. Deliberately NOT
-      # hmConfig.config.home.packages: standalone Home Manager folds its own
-      # baseline (man-db, shared-mime-info, the reference manpage) into that
-      # list, which has no business in a container bundle.
+      # opencode, claude, claude-free, writing.
       agentRuntime = pkgs.buildEnv {
         name = "agent-runtime";
         paths = hmConfig.config.agent.runtimePackages;
         pathsToLink = [
           "/bin"
         ];
-        # home.packages has no collisions today (the real claude binary is
-        # reached through the wrapper's absolute store path, not via PATH), but
-        # don't fail the build if a future agent ships one anyway.
-        ignoreCollisions = true;
       };
 
       # The rendered ~/.pi and ~/.config/opencode trees as store paths, so a
@@ -113,10 +106,7 @@
       homeModules.default = ./modules/home.nix;
       homeModules.container = ./modules/container.nix;
 
-      homeConfigurations = {
-        agent-runtime = hmConfig;
-        default = hmConfig;
-      };
+      homeConfigurations.agent-runtime = hmConfig;
 
       packages.${system} = {
         inherit agentRuntime agentRuntimeConfig agentRuntimeInstall;
@@ -126,36 +116,22 @@
         default = agentRuntime;
       };
 
-      # Checks: every provider resolves to a token, and the bundle actually
-      # contains the agents we promise.
-      checks.${system} = {
-        providers-well-formed =
-          let
-            bad = lib.filterAttrs (_: p: !(p ? tokenSource && (p.tokenSource ? env || p.tokenSource ? file))) (
-              import ./data/providers.nix
-            );
-          in
-          assert bad == { };
-          pkgs.runCommand "providers-well-formed" { } ''
-            echo "providers ok"
+      # The contract the modules assert for every consumer, checked against the
+      # bundle the container output ships: every agent must actually be in it.
+      checks.${system}.bundle-contains-agents =
+        pkgs.runCommand "bundle-contains-agents"
+          {
+            nativeBuildInputs = [ pkgs.coreutils ];
+          }
+          ''
+            for bin in claude claude-free writing opencode pi; do
+              if [ ! -x "${agentRuntime}/bin/$bin" ]; then
+                echo "missing from bundle: $bin" >&2
+                exit 1
+              fi
+            done
             touch $out
           '';
-
-        bundle-contains-agents =
-          pkgs.runCommand "bundle-contains-agents"
-            {
-              nativeBuildInputs = [ pkgs.coreutils ];
-            }
-            ''
-              for bin in claude claude-free writing opencode pi; do
-                if [ ! -x "${agentRuntime}/bin/$bin" ]; then
-                  echo "missing from bundle: $bin" >&2
-                  exit 1
-                fi
-              done
-              touch $out
-            '';
-      };
 
       devShells.${system}.default = pkgs.mkShellNoCC {
         packages = [

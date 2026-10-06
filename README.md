@@ -155,9 +155,10 @@ Wrappers export `ANTHROPIC_*` for their own process and exec the real binary by
 absolute store path, so one binary serves several providers without a global
 shell export. `writing` is a one-shot per-project setup: it merges the `custom`
 provider into `./.claude/settings.local.json` (mode 0600) and prints the
-follow-up steps. `agent.claudeCode.exposeRealBinary` additionally puts the
-unwrapped `claude` on PATH — off by default, because it collides with the
-wrapper of the same name.
+follow-up steps (plain bash in `data/scripts/writing.sh`, its environment
+injected from `modules/wrappers.nix`). `agent.claudeCode.exposeRealBinary`
+additionally puts the unwrapped `claude` on PATH — off by default, because it
+collides with the wrapper of the same name.
 
 ## Skills
 
@@ -200,10 +201,10 @@ turbcool/nixos' `config/skills.nix`).
 | Option | Type | Default | Effect |
 |---|---|---|---|
 | `agent.providers` | attrs | `data/providers.nix` | provider registry; on NixOS the NixOS module rewrites `agenixFiles` providers to store paths |
-| `agent.defaultModel` | nullOr str | `"free/main"` | `provider/model`; pi gets the two halves, opencode the joined string |
+| `agent.defaultModel` | str | `"free/main"` | `provider/model`; pi gets the two halves, opencode the joined string |
 | `agent.smallModel` | str | `"custom/qwen3-coder-next"` | small/subagent tier — one line moves it for pi *and* opencode |
-| `agent.mcp` | attrs | `data/mcp.nix` | MCP registry; read by the Claude Code wrappers (via `claudeCode` subset). Not written into opencode.json — a consumer CLI (turbcool/nixos ships `mcp <group|server>`) merges per-server configs into it |
-| `agent.plugins` | attrs | `data/plugins.nix` | Claude Code marketplaces + enabled plugins (NixOS side) |
+| `agent.mcp` | attrs | `data/mcp.nix` | MCP registry. Its `npm` set (the npm-installed servers) is written into opencode.json *and* handed to the Claude Code wrappers, each in its own dialect; the rest reaches opencode.json through the consumer's `mcp <group\|server>` CLI |
+| `agent.plugins` | attrs | `data/plugins.nix` | Claude Code marketplaces + enabled plugins; only NixOS consumes them (into managed-settings.json) |
 | `agent.skills.enable` | bool | `true` | declare the bundled skills |
 | `agent.agents.enable` | bool | `true` | put `pi` + `opencode` in `home.packages` |
 | `agent.agents.includeTui` | bool | `true` | also install `agent-deck`; off for slim/headless bundles |
@@ -229,7 +230,7 @@ the only thing that reaches pi's excluded-tool list. donsetch's `web_fetch` and
 | Option | Type | Default | Effect |
 |---|---|---|---|
 | `agent.agenixFiles` | attrsOf path | `{}` | provider name → `.age` ciphertext; declares `age.secrets.<name>-token` (0400) and rewrites that provider's `tokenSource` to the store path |
-| `agent.claudeCode.{enable,provider,mainModel,smallModel}` | — | as above | merged with the HM options of the same name |
+| `agent.claudeCode.{enable,provider,mainModel,smallModel}` | — | as above | declared once in `modules/options.nix` and imported by both halves |
 
 Also writes, without an option of its own:
 
@@ -274,11 +275,14 @@ extension config under `~/.config/<ext>/`, and `.claude/settings.local.json` +
 ## MCP servers
 
 `data/mcp.nix` is the registry: `nixos`, `daisyui`, `svelte`, `lucide-icons`,
-`wiki`, `donsetch`, `bladebro`, plus a `groups` view (`nixos`, `frontend`,
-`wiki`) and a `claudeCode` subset. Every server has an `enabled` flag; the
-Claude Code wrappers resolve `@@SECRET:…@@`/`@@ENV:…@@` sentinels at launch and
-rewrite commands to absolute `$HOME/.npm/bin/…` paths, because a wrapper's
-environment can predate `home.sessionPath` (GUI launch, container without rc).
+`wiki`, plus a `groups` view (`nixos`, `frontend`, `wiki`) and the reserved
+`npm` set — `donsetch` and `bladebro`, whose binaries are npm-installed into
+`~/.npm/bin`. Each ordinary server has an `enabled` flag. `npm` is declared once
+and derived twice: into opencode.json (`type = "local"`, absolute command path)
+and into each `claude` wrapper's `--mcp-config` (`type = "stdio"`). Both forms
+use absolute `$HOME/.npm/bin/…` paths, because a wrapper's environment can
+predate `home.sessionPath` (GUI launch, container without rc). A consumer
+enumerating servers must skip `groups` and `npm`.
 
 `donsetch` and `bladebro` are not Nix packages — they are npm-installed per user
 (`npm i -g bladebro donsetch`) and need `programs.nix-ld` on NixOS.
@@ -294,13 +298,14 @@ and i-have-adhd opencode plugins by absolute store path.
 ## Checks, dev, gotchas
 
 ```bash
-nix flake check            # providers-well-formed + bundle-contains-agents
+nix flake check            # bundle-contains-agents
 nix develop                # jq, nixfmt, statix
 ```
 
-- The two checks are the contract: every provider resolves to a token
-  (`env` or `file`), and `agent-runtime` actually contains `claude`,
-  `claude-free`, `writing`, `opencode`, `pi`.
+- The check is the contract for the bundle: `agent-runtime` must actually
+  contain `claude`, `claude-free`, `writing`, `opencode`, `pi`. Config
+  correctness is asserted by the modules themselves instead, so it is checked
+  for *every* consumer — not only for the defaults a flake check can see.
 - **No top-level `formatter` output.** Nix evaluates a `formatter` at system
   `«none»` here and `nix flake check` fails; format with the devshell's `nixfmt`
   (the old `nixfmt-rfc-style` alias).
