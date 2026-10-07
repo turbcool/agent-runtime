@@ -6,7 +6,7 @@ pair, three consumers:
 
 | Consumer | How it uses this flake |
 |---|---|
-| NixOS + Home Manager | `nixosModules.default` + `homeModules.default` |
+| NixOS + Home Manager | `nixosModules.default` **alone** — it injects the home half itself |
 | Standalone container | `nix profile install …#agent-runtime` (env-var tokens) |
 | Any other HM setup | `homeModules.default` alone (tokens from the environment) |
 
@@ -14,10 +14,20 @@ Same modules everywhere, so a desktop login and a container image get byte-ident
 `~/.pi` and `~/.config/opencode` trees — only the token *source* differs.
 
 ```nix
-# NixOS + Home Manager (consumer side)
-inputs.agent-runtime.nixosModules.default   # agenix secrets, Claude Code managed settings
-inputs.agent-runtime.homeModules.default    # pi/opencode config, binaries, all agent.* options
+# NixOS + Home Manager (consumer side) — one import, that is the whole setup
+inputs.agent-runtime.nixosModules.default   # agenix secrets, Claude Code managed
+                                            # settings, npm + nix-ld, and it wires
+                                            # the home half via home-manager.sharedModules
 ```
+
+The NixOS module injects the Home Manager half through
+`home-manager.sharedModules` + `home-manager.extraSpecialArgs.runtimeInputs`, so a
+NixOS host writes **no** Home Manager code and never imports
+`homeModules.default` itself. `nixosModules.default` is a plain path, so a host
+that *also* imports `homeModules.default` for its own overrides still dedupes
+cleanly instead of colliding. A non-NixOS consumer (plain HM, no
+`home-manager` NixOS module) imports `homeModules.default` directly, because
+there is no `sharedModules` to inject through.
 
 **The flake ships no secrets and no absolute paths.** A container install needs
 nothing but the binaries and `AGENT_*_TOKEN` env vars.
@@ -31,6 +41,7 @@ nothing but the binaries and `AGENT_*_TOKEN` env vars.
 - [What lands on disk](#what-lands-on-disk)
 - [MCP servers](#mcp-servers)
 - [Claude Code plugins](#claude-code-plugins)
+- [Flake outputs](#flake-outputs)
 - [Checks, dev, gotchas](#checks-dev-gotchas)
 
 ## Quick start
@@ -40,8 +51,14 @@ nothing but the binaries and `AGENT_*_TOKEN` env vars.
 ```bash
 nix profile install github:turbcool/agent-runtime#agent-runtime             # pi, opencode, mcp, claude, claude-free, writing
 nix build github:turbcool/agent-runtime#agent-runtime-config                # rendered config + skill trees, for COPY in a Dockerfile
+nix run github:turbcool/agent-runtime#install                               # one command: install binaries, copy config, seed npm, report missing tokens
 nix develop github:turbcool/agent-runtime                                  # ad-hoc shell (jq, nixfmt, statix)
 ```
+
+`#install` is the no-argument convenience wrapper (`lib/install.sh`): it links
+the binaries, `cp -rL`s the config tree into `$HOME`, seeds the npm globals the
+MCP servers need, and prints which `AGENT_*_TOKEN` env vars are still missing.
+It substitutes the store paths at build time, so it needs no arguments.
 
 `#agent-runtime` is a `buildEnv` of `agent.runtimePackages` — deliberately not
 `home.packages`, because standalone HM folds its own baseline (man-db,
@@ -61,16 +78,22 @@ inputs.agent-runtime = {
   inputs = { nixpkgs.follows = "nixpkgs"; home-manager.follows = "home-manager"; };
 };
 
-# imports
-inputs.agent-runtime.nixosModules.default   # → agent.agenixFiles, agent.claudeCode.*
-inputs.agent-runtime.homeModules.default    # → agent.providers, agent.defaultModel, ...
+# imports — this single import is the whole NixOS setup
+inputs.agent-runtime.nixosModules.default   # → agent.agenix*, agent.claudeCode.*,
+                                            #   agent.skills.sources, npm + nix-ld,
+                                            #   and it injects the home half
 
-# the only required host-side wiring: provider name → .age ciphertext
-agent.agenixFiles = {
-  neoplatform = ../secrets/neoplatform-token.age;
-  custom = ../secrets/custom-token.age;
-  free = ../secrets/free-token.age;
-};
+# host-only skills, merged into the runtime's own catalog
+agent.skills.sources = { orca.path = "${inputs.orca-skills}/skills"; };
+
+# provider .age ciphertexts: one directory covers the whole registry
+agent.agenixDir = ../secrets;   # → ../secrets/<provider>-token.age per provider
+# (or name them explicitly instead:)
+# agent.agenixFiles = { neoplatform = ../secrets/neoplatform-token.age; };
+
+# owner of the decrypted secrets; without it agenix defaults to root, which a
+# desktop login cannot read
+agent.agenixOwner = "turb";
 ```
 
 Those tokens are then decrypted by agenix and every agent reads them from
@@ -128,11 +151,12 @@ agent.providers = (import <agent-runtime>/data/providers.nix) // {
 ### Token resolution
 
 One field, `tokenSource`, two resolvers. `data/providers.nix` declares
-`{ env = … }`; on NixOS every provider named in `agent.agenixFiles` is rewritten
-to the decrypted secret's store path (`agent.resolvedProviders`), which
-Home Manager receives through the consumer's bridge module.
+`{ env = … }`; on NixOS every provider named in `agent.agenixDir` /
+`agent.agenixFiles` is rewritten to the decrypted secret's path
+(`agent.resolvedProviders`), which Home Manager receives through
+`home-manager.sharedModules` — the consumer writes no bridge module.
 
-| | NixOS host (`agenixFiles`) | Container / plain HM |
+| | NixOS host (`agenixDir`/`agenixFiles`) | Container / plain HM |
 |---|---|---|
 | declared | `{ env = "AGENT_FREE_TOKEN"; }` | same |
 | resolved | `{ file = /run/agenix/free-token; }` | unchanged |
@@ -146,11 +170,13 @@ Consequences worth keeping:
   never baked into a script or a JSON file in the store. pi reads it per
   request; do **not** run pi's `/login` for these providers — `auth.json` takes
   precedence over the provider's `apiKey`.
-- A provider absent from `agenixFiles` stays env-based on NixOS too. That is the
-  intended escape hatch for a provider whose token you manage yourself.
-- `agent.agenixFiles` keys must match provider names; the agenix secret is named
-  `<provider>-token` and gets `mode = "0400"`, chowned to
-  `local.profile.username` when that option exists.
+- A provider absent from both `agenixDir` and `agenixFiles` stays env-based on
+  NixOS too. That is the intended escape hatch for a provider whose token you
+  manage yourself.
+- `agenixFiles` keys must match provider names; the agenix secret is named
+  `<provider>-token` and gets `mode = "0400"`. Its owner is `agent.agenixOwner`
+  when set; when that is null agenix falls back to root, which a desktop login
+  usually cannot read — so a host with a user should set it.
 
 ### Provider-pinned commands
 
@@ -201,14 +227,28 @@ declares the sources and agent-skills' activation links the trees; for the
 standalone config there is no activation, so the filtered bundles are
 registered in `agent.runtimeFiles` for `agent-runtime-config` to ship.
 
-**Adding host-specific skills:** extend `programs.agent-skills.sources`, never
-import the agent-skills Home Manager module again. `modules/skills.nix` is the
-only importer, and the module is a Nix *function*, so a second import makes every
-`programs.agent-skills.*` option collide ("already declared").
+**Adding host-specific skills:** set `agent.skills.sources` — the host-facing
+mirror of `programs.agent-skills.sources`, so a NixOS host never touches the
+agent-skills options (or its module) directly:
 
 ```nix
-programs.agent-skills.sources.my-skill = { path = "${myRepo}/skills"; };
+# a NixOS host: host-only skills, merged with the runtime's own
+agent.skills.sources.my-skill = { path = "${inputs.my-skills}/skills"; };
 ```
+
+`modules/skills.nix` merges both registries into one catalog, then builds the
+per-source installers and the dispatcher into `agent.skillTools`:
+
+| Command | What it does |
+|---|---|
+| `skills <source>` | install one source's skills into the current project |
+| `skills-install-<source>` | the same, one binary per source, for scripts and CI |
+
+Both land in `home.packages` / `#agent-runtime`, so a container gets them too and
+no host has to ship its own `skills` wrapper. Extend the sources, never import
+the agent-skills Home Manager module yourself: `modules/skills.nix` is the only
+importer, and it is a plain path, so a second import of the *runtime* module
+dedupes rather than colliding.
 
 Two registries merge into one catalog on purpose: runtime skills above
 (hosts **and** containers) plus whatever a host adds (e.g. `orca*` in
@@ -220,7 +260,7 @@ turbcool/nixos' `config/skills.nix`).
 
 | Option | Type | Default | Effect |
 |---|---|---|---|
-| `agent.providers` | attrs | `data/providers.nix` | provider registry; on NixOS the NixOS module rewrites `agenixFiles` providers to store paths |
+| `agent.providers` | attrs | `data/providers.nix` | provider registry; on NixOS the NixOS module rewrites `agenixDir`/`agenixFiles` providers to their decrypted path |
 | `agent.defaultModel` | str | `"free/main"` | `provider/model`; pi gets the two halves, opencode the joined string |
 | `agent.smallModel` | str | `"custom/qwen3-coder-next"` | small/subagent tier for pi *and* opencode — one line moves both |
 | `agent.mcp` | attrs | `data/mcp.nix` | MCP registry, in three sets: `servers`/`groups` (offered by the `mcp` command, which ships with the bundle) and `npm`, written into opencode.json *and* into each claude command's `--mcp-config`. The `mcp` command renders this same option, so an override reaches both |
@@ -230,7 +270,8 @@ turbcool/nixos' `config/skills.nix`).
 | `agent.claudeCode.enable` | bool | `true` | install the provider-pinned commands |
 | `agent.claudeCode.commands` | attrsOf `{ provider, script ? null }` | `claude`, `claude-free`, `writing` | one command per provider; the attr name is the command, `script` replaces the claude exec (see above) |
 
-Internal: `agent.runtimeFiles`, `agent.runtimePackages` — computed, read-only.
+Internal: `agent.runtimeFiles`, `agent.runtimePackages`, `agent.skillTools`,
+`agent.mcpCommand` — computed, read-only.
 
 `agent.pi.enable`/`agent.opencode.enable`/`agents.enable`/`skills.enable` are
 gone: nothing flipped them, and the config files they guarded are the reason the
@@ -244,12 +285,25 @@ the only thing that reaches pi's excluded-tool list. donsetch's `web_fetch` and
 
 | Option | Type | Default | Effect |
 |---|---|---|---|
-| `agent.agenixFiles` | attrsOf path | `{}` | provider name → `.age` ciphertext; declares `age.secrets.<name>-token` (0400) and rewrites that provider's `tokenSource` to the store path |
+| `agent.agenixDir` | nullOr path | `null` | convention alternative to `agenixFiles`: every provider in the registry gets `<dir>/<provider>-token.age`, so one directory entry covers the whole registry. Merged with the explicit map |
+| `agent.agenixFiles` | attrsOf path | `{}` | provider name → `.age` ciphertext; declares `age.secrets.<name>-token` (0400) and rewrites that provider's `tokenSource` to the decrypted path |
+| `agent.agenixOwner` | nullOr str | `null` | owner of the decrypted secrets; null means "don't say", and agenix then uses root, which a desktop login usually cannot read |
+| `agent.skills.sources` | attrs | `{}` | host-only skills, merged with the runtime's own into one catalog (see [Skills](#skills)) |
 | `agent.claudeCode.{enable,commands}` | — | as above | declared once in `modules/options.nix` and imported by both halves |
+
+Everything below is wired without the consumer asking:
+
+- `home-manager.sharedModules` + `home-manager.extraSpecialArgs.runtimeInputs` —
+  guarded on the `home-manager` NixOS module being imported, so this flake never
+  *requires* it. This is what makes a NixOS host a one-import setup, and it is
+  `sharedModules` precedence so a host's own Home Manager config still wins.
+- `programs.npm` (with an `npmrc` assertion against `agent.npmPrefix`) and
+  `programs.nix-ld` — the prerequisites of the npm MCP servers, previously
+  repeated by every consumer.
 
 Also writes, without an option of its own:
 
-- `age.secrets.<provider>-token` for each entry in `agenixFiles`
+- `age.secrets.<provider>-token` for each provider in `agenixDir`/`agenixFiles`
 - `/etc/claude-code/managed-settings.json` — the immutable Claude Code settings:
   plugin marketplaces and enabled plugins, nothing else. Highest precedence by
   design, which leaves the user-scope `~/.claude/settings.json` writable for the
@@ -317,11 +371,16 @@ path; Claude Code infers stdio from `command`). `npm` commands are absolute
 paths for both, because an agent's environment can predate `home.sessionPath`
 (GUI launch, container without rc).
 
-A server that needs a binary nobody installs is dead weight — `mcp-nixos` comes
-from `common/pkgs/dev.nix` on the host; add the package or drop the entry.
+A server that needs a binary nobody installs is dead weight — so a `package`-backed
+entry is resolved by the module itself (`pkgs.${entry.package}`, added to
+`agent.runtimePackages`), rather than each consumer listing the same package
+again. `mcp-nixos` is such an entry. An npm server still needs its global
+install.
 
 `donsetch` and `bladebro` are not Nix packages — they are npm-installed per user
-(the activation hook does it when missing) and need `programs.nix-ld` on NixOS.
+(the activation hook does it when missing). On NixOS the runtime enables
+`programs.nix-ld` for them, because the host otherwise has to remember that
+their prebuilt glibc binaries need the NixOS stub loader.
 
 ## Claude Code plugins
 
@@ -333,17 +392,37 @@ Its `opencodePlugins` list names the repos `modules/home.nix` loads into
 opencode.json as plugins, by absolute store path resolved from this flake's
 inputs.
 
+## Flake outputs
+
+| Output | What it is |
+|---|---|
+| `nixosModules.default` | the one-import NixOS setup (see [NixOS host](#nixos-host)) |
+| `homeModules.default` | the home half alone, for a plain Home Manager consumer |
+| `homeModules.container` | `homeModules.default` + `modules/container.nix` (headless tweaks: no TUI extras, `$HOME` handling) |
+| `homeConfigurations.agent-runtime` | a ready standalone Home Manager configuration, no OS under it |
+| `packages.agent-runtime` (also `default`) | the `buildEnv` bundle of `agent.runtimePackages` |
+| `packages.agent-runtime-config` | the rendered config + skill trees, a `linkFarm` for `COPY` |
+| `packages.install` | no-argument installer: bundle on PATH, config into `$HOME`, seed npm, report missing tokens |
+| `packages.mcp` | just the `mcp` command, for a client that already has the bundle |
+| `lib.data` | the registries (`providers`, `mcp`, `plugins`, `skills`) so a client extends a record instead of re-deriving it |
+| `lib.agentSkills` | agent-skills' library, for a client that wants a bundle shape of its own |
+| `checks` | `bundle-contains-agents`, `mcp-servers-exist` |
+| `devShells.default` | jq, nixfmt, statix |
+
 ## Checks, dev, gotchas
 
 ```bash
-nix flake check            # bundle-contains-agents
+nix flake check            # bundle-contains-agents, mcp-servers-exist
 nix develop                # jq, nixfmt, statix
 ```
 
-- The check is the contract for the bundle: `agent-runtime` must actually
-  contain every `agent.claudeCode.commands` key plus `opencode`, `pi`, `mcp`.
-  The list is derived from the option, so adding a command covers itself.
-  Config correctness is asserted by the modules themselves instead, so it is
+- `bundle-contains-agents` is the contract for the bundle: `agent-runtime` must
+  actually contain every `agent.claudeCode.commands` key plus `opencode`, `pi`,
+  `mcp`. The list is derived from the option, so adding a command covers itself.
+- `mcp-servers-exist` keeps the registry honest: every `package`-backed server
+  must name a package that really exists in `pkgs`, so a typo in `data/mcp.nix`
+  fails a check instead of a user's build.
+- Config correctness is asserted by the modules themselves instead, so it is
   checked for *every* consumer — not only for the defaults a flake check can
   see.
 - **No top-level `formatter` output.** Nix evaluates a `formatter` at system
