@@ -419,6 +419,10 @@ in
   imports = [
     ./options.nix
     (import ./skills.nix { inherit runtimeInputs; })
+    # cc-switch engine: inert unless agent.ccSwitch.enable. Importing it here
+    # declares agent.ccSwitch.* for every consumer; the module body only
+    # contributes runtimePackages/activation when enabled.
+    ./ccswitch.nix
   ];
 
   options.agent = {

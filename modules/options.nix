@@ -108,5 +108,50 @@
         '';
       };
     };
+
+    profiles = lib.mkOption {
+      type = lib.types.attrs;
+      default = import ../data/profiles.nix;
+      description = ''
+        Profile registry (data/profiles.nix). A profile names providers, mcp
+        servers, skills and prompts that a single `profile <name>` call
+        activates across claude/opencode/pi. Profiles are dialect-free and
+        resolved against `agent.providers` / `agent.mcp` / `agent.skills.sources`
+        by `modules/ccswitch.nix`; `extends` inherits (checked) another profile.
+        Consumers merge: `agent.profiles = lib.data.profiles // { mine = …; };`.
+      '';
+    };
+
+    ccSwitch = {
+      enable = lib.mkEnableOption ''
+        Drive provider/MCP/skill/prompt management for claude/opencode/pi through
+        cc-switch-cli (nixpkgs). When on, the runtime compiles the registries
+        into cc-switch records on activation and ships `profile`/`provider`
+        commands that wrap cc-switch verbs; cc-switch owns the live config files
+        its service layer writes, the runtime keeps only the pi files cc-switch
+        disclaims (settings.json default model + ~/.pi/agent/mcp.json) and the
+        static opencode keys + plugin list. Off by default here.
+      '' // { default = false; };
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = null;
+        defaultText = lib.literalExpression "pkgs.cc-switch-cli";
+        description = ''
+          cc-switch-cli package to drive. Null falls back to `pkgs.cc-switch-cli`
+          in `modules/ccswitch.nix` when enabled. Override to pin a version or
+          swap a fork.
+        '';
+      };
+
+      # Internal: resolved-profile JSON per name, consumed by the `profile`
+      # shim. Built only when enabled, so hosts that leave it off get no farm.
+      profileShards = lib.mkOption {
+        type = lib.types.attrsOf lib.types.path;
+        default = { };
+        internal = true;
+        description = "Resolved profile JSON (after extends expansion + mcp group expansion), per profile name.";
+      };
+    };
   };
 }

@@ -42,6 +42,25 @@ runtime owner of live config files, with the agent-runtime flake remaining the
 | `~/.claude/skills`, `~/.config/opencode/skills`, `~/.pi/agent/skills` | cc-switch SSOT |
 | `.agents/skills` (cross-vendor; cc-switch ignores) | runtime / agent-skills |
 
+## `provider` verb map (verified V3/V4)
+
+`provider set-default` only works for Hermes/OpenClaw (errors otherwise). Use:
+
+- `cc-switch --app claude provider switch <id>` → writes `env.*` + `model` to
+  `~/.claude/settings.json` (key-less; runtime wrapper supplies the agenix key).
+- `cc-switch --app open-code provider switch <id>` → writes the provider node
+  into global `~/.config/opencode/opencode.json` (all providers pre-seeded).
+  **Default `model` is owned by the runtime**: a user-owned `OPENCODE_CONFIG`
+  overlay (higher precedence than global opencode.json) holds `model`/`small_model`,
+  so `provider N` rewrites that overlay to `N/<model>`. No contention (cc-switch
+  doesn't touch model; we don't touch provider/mcp).
+- pi: cc-switch only manages `models.json`; runtime writes
+  `~/.pi/agent/settings.json` (`defaultProvider`/`defaultModel`).
+
+cc-switch **does not** write a default `model` for opencode (verified: opencode.json
+has no `model` key after `provider switch`) and `provider current` is a no-op for
+opencode — so opencode model switching is the runtime's `provider` command.
+
 ## Token strategy for claude
 
 `ANTHROPIC_API_KEY` is **omitted** from cc-switch's claude provider record and
@@ -54,7 +73,7 @@ on disk, never in the DB).
 
 ## Files (diff plan)
 
-- `data/profiles.nix` — `base` + `work`, `extends`. (NEW)
+- `data/profiles.nix` — `base` + `work` profiles (`extends`-based). (NEW)
 - `lib/ccswitch.nix` — `renderProvider app name p`, `resolveProfile profiles name`,
   `expandMcp mcpReg names`. (NEW, pure)
 - `modules/ccswitch.nix` — shims `profile`/`provider`, seed activation, provider

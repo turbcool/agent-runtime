@@ -247,12 +247,43 @@
               done
               touch $out
             '';
+
+          # A profile is dialect-free and resolved against the provider/mcp/skill
+          # registries; resolve every profile (extends + mcp-group expansion) and
+          # render every provider in all three dialects at eval time, so a bad
+          # name or a cycle fails `nix flake check` instead of a `profile` call.
+          profiles-resolve = pkgs.runCommand "profiles-resolve"
+            { nativeBuildInputs = [ pkgs.jq ]; }
+            (let
+              render = (import ./lib/ccswitch.nix) lib;
+              providers = import ./data/providers.nix;
+              mcp = import ./data/mcp.nix;
+              profiles = import ./data/profiles.nix;
+              resolved = lib.mapAttrs (n: _:
+                let r = render.resolveProfile profiles n; in
+                r // { mcp = render.expandMcp mcp r.mcp; }
+              ) profiles;
+              rendered = lib.genAttrs render.apps (app:
+                lib.mapAttrs (n: p: render.renderProvider app n p) providers
+              );
+            in
+            ''
+              printf '%s\n' ${lib.escapeShellArg (builtins.toJSON { profiles = resolved; providers = rendered; })} \
+                | ${pkgs.jq}/bin/jq -e '.profiles and .providers' > /dev/null
+              echo 'profiles + providers resolve and render in all dialects' >&2
+              touch $out
+            ''
+            )
+          ;
         }
       );
 
       # The data registries, so a client extends a record instead of
       # re-deriving it.
-      lib.data = data;
+      lib.data = data // {
+        profiles = import ./data/profiles.nix;
+        ccswitch = (import ./lib/ccswitch.nix) lib;
+      };
 
       # agent-skills' library, for a client that wants a bundle shape of its own.
       lib.agentSkills = inputs.agent-skills.lib.agent-skills;
