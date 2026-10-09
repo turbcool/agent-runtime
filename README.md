@@ -35,6 +35,7 @@ nothing but the binaries and `AGENT_*_TOKEN` env vars.
 ## Contents
 
 - [Quick start](#quick-start)
+- [Using the runtime](#using-the-runtime)
 - [Providers](#providers)
 - [Skills](#skills)
 - [Configuration options](#configuration-options)
@@ -110,6 +111,50 @@ inputs and writes no `follows` wiring for them — it just imports the module:
 ```nix
 inputs.agent-runtime.homeModules.default;
 ```
+
+## Using the runtime
+
+For the person at the keyboard. Once the runtime is on `PATH` — a NixOS host, or
+a container built from `#agent-runtime` — these are the commands and the choices.
+
+### Commands
+
+| Command | What it runs |
+|---|---|
+| `pi` | the pi coding agent (its wrapper hides pi's `web_crawl` tool) |
+| `opencode` | the opencode agent |
+| `claude` | Claude Code on the **neoplatform** endpoint, npm MCP servers wired in |
+| `claude-free` | the same, repointed at the **free** endpoint / free-account token |
+| `writing` | Claude Code + `data/scripts/writing.sh` — merges this run's env into the project's `.claude/settings.local.json` |
+| `mcp <group\|server>` | merge a rendered MCP fragment into the **current project's** `opencode.json` (`mcp nixos`, `mcp frontend`) |
+| `skills <source>` / `skills-install-<source>` | install a skill source into the current project |
+
+### Choosing a provider
+
+Three providers ship — `neoplatform`, `custom`, `free` ([full table](#providers)).
+On NixOS their keys are decrypted to `/run/agenix/<id>-token`; in a container,
+export `AGENT_NEOPLATFORM_TOKEN`, `AGENT_CUSTOM_TOKEN`, `AGENT_FREE_TOKEN`.
+
+- **Claude Code** — pick with the command: `claude` → `neoplatform`,
+  `claude-free` → `free`, `writing` → `custom`.
+- **pi and opencode** — pick in Nix as `provider/model`, one line each:
+  `agent.defaultModel` (default `"free/main"`) and `agent.smallModel`
+  (default `"custom/qwen3-coder-next"`), e.g. `neoplatform/deepseek-v4-flash`.
+  Rebuild and both agents follow.
+
+### What's always on
+
+- **MCP** — `donsetch` (fetch/search/crawl) and `bladebro` (stealth browser) are
+  wired into every agent, always. The rest (`nixos`, `daisyui`, `svelte`,
+  `lucide-icons`, and the `frontend` / `nixos` groups) is opt-in per project with
+  `mcp <group|server>`.
+- **Skills** — ten ship with the runtime (`archify`, `archify-review`,
+  `i-have-adhd`, `qmd`, `ponytail` + five `ponytail-*`), plus whatever a host
+  adds (e.g. `orca`). `skills <source>` installs a source into a project.
+
+Switching a provider from the shell (`provider <id>` / `profile <name>` via
+cc-switch) is the next cutover; until then, pick with the pinned commands or
+`agent.defaultModel`.
 
 ## Providers
 
