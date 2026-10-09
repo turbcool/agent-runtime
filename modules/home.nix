@@ -57,8 +57,10 @@ let
     else
       {
         # "$VAR" — expanded by the shell at launch time, so the key itself never
-        # appears in the command script. (`\$` escapes the Nix interpolation.)
-        shell = "\"$${ts.env}\"";
+        # appears in the command script. Built by concatenation because a Nix
+        # string "$${ts.env}" is the literal text `$${ts.env}`; this is the
+        # container path (on NixOS agenix rewrites to the `file` branch above).
+        shell = "\"" + "$" + ts.env + "\"";
         command = "!printenv ${ts.env}";
         opencode = "{env:${ts.env}}";
       }

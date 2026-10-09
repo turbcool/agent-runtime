@@ -88,7 +88,13 @@ rec {
       }
     else
       {
-        shell = "\"$${ts.env}\"";
+        # "$VAR" — expanded by the shell at launch, so the key itself never
+        # lands in a script or a file. Built by concatenation: a Nix string
+        # "$${ts.env}" is the *literal* text `$${ts.env}` (a `$` not followed by
+        # an interpolation is left alone), which silently yielded an empty key
+        # on the env path (only reachable in containers — on NixOS agenix
+        # rewrites every token to the `file` branch above).
+        shell = "\"" + "$" + ts.env + "\"";
         command = "!printenv ${ts.env}";
         opencode = "{env:${ts.env}}";
       };
