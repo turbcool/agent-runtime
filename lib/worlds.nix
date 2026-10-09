@@ -27,7 +27,10 @@ lib:
 let
   inherit (lib) mapAttrs mapAttrsToList concatLists concatMap removeSuffix optionals;
 
-  inherit (lib.strings) escapeShell;
+  # Top-level lib only: this renderer is evaluated with the *consuming host's*
+  # nixpkgs (the module receives its `pkgs`/`lib` as ordinary module args), so
+  # it must stick to functions every nixpkgs has. `lib.strings.escapeShell` is
+  # newer than some hosts and fails there while passing this repo's own check.
 
   head0 = xs: builtins.head xs;
   last0 = xs: builtins.elemAt xs ((builtins.length xs) - 1);
@@ -82,7 +85,7 @@ rec {
     in
     if ts ? file then
       {
-        shell = "$(cat ${escapeShell ts.file})";
+        shell = "$(cat ${lib.escapeShellArg ts.file})";
         command = "!cat ${ts.file}";
         opencode = "{file:${ts.file}}";
       }
