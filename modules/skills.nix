@@ -23,18 +23,6 @@ let
   cfg = config.agent;
   skillConfig = import ../data/skills.nix { inherit runtimeInputs; };
 
-  # Where each target reads its skills, in $HOME. `.agents/skills` is the
-  # cross-vendor convention that agents other than opencode/claude read; it
-  # costs one symlink tree and means a new agent picks the skills up without
-  # another entry here. agent-skills resolves these at activation time from
-  # $HOME, so the bundle path has to match its own target dests — the keys are
-  # therefore also the set of enabled targets.
-  targetDest = {
-    agents = ".agents/skills";
-    claude = ".claude/skills";
-    opencode = ".config/opencode/skills";
-  };
-
   # The merged catalog: runtime skills + client skills. agent-skills resolves
   # `path`-addressed sources without any input of its own, which is what lets a
   # client add `{ path = "${inputs.foo}/skills"; }` from its own flake.
@@ -134,17 +122,13 @@ in
   config = {
     programs.agent-skills = {
       enable = true;
-      # One merged set: the runtime's skills first, then the client's.
+      # One merged set: the runtime's skills first, then the client's. This is
+      # the catalog the per-project `skills <source>` installers and the world's
+      # skill bundles are built from. The machine-wide link-trees themselves
+      # are owned by the active world (modules/worlds.nix), so agent-skills is
+      # NOT told to link every target here — that would give each skill tree a
+      # second writer and make `profile` unable to change the active skills.
       sources = skillConfig // cfg.skills.sources;
-      skills.enableAll = true;
-      targets = lib.genAttrs (lib.attrNames targetDest) (_: {
-        enable = true;
-      });
     };
-
-    agent.runtimeFiles = lib.mapAttrs' (name: path: {
-      name = targetDest.${name};
-      value = path;
-    }) (lib.filterAttrs (name: _: targetDest ? ${name}) config.programs.agent-skills.targetBundlePaths);
   };
 }

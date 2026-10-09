@@ -248,29 +248,33 @@
               touch $out
             '';
 
-          # A profile is dialect-free and resolved against the provider/mcp/skill
-          # registries; resolve every profile (extends + mcp-group expansion) and
-          # render every provider in all three dialects at eval time, so a bad
-          # name or a cycle fails `nix flake check` instead of a `profile` call.
-          profiles-resolve = pkgs.runCommand "profiles-resolve"
+          # A profile is dialect-free and resolved against the provider/mcp
+          # registries; resolve every profile (extends + mcp-group expansion)
+          # and render each one into a full world (opencode.json, pi settings/
+          # models/mcp) at eval time, so a bad name or a cycle fails
+          # `nix flake check` instead of a `profile` call. (Skill names are
+          # checked against the merged source set by a module assertion, which
+          # a client can extend; here we only see the bundled registries.)
+          worlds-resolve = pkgs.runCommand "worlds-resolve"
             { nativeBuildInputs = [ pkgs.jq ]; }
             (let
-              render = (import ./lib/ccswitch.nix) lib;
+              W = (import ./lib/worlds.nix) lib;
               providers = import ./data/providers.nix;
               mcp = import ./data/mcp.nix;
               profiles = import ./data/profiles.nix;
-              resolved = lib.mapAttrs (n: _:
-                let r = render.resolveProfile profiles n; in
-                r // { mcp = render.expandMcp mcp r.mcp; }
+              rendered = lib.mapAttrs (n: _:
+                W.render {
+                  inherit providers mcp profiles;
+                  name = n;
+                  npmBin = "/run/current-system/sw/bin";
+                  smallModel = "custom/qwen3-coder-next";
+                }
               ) profiles;
-              rendered = lib.genAttrs render.apps (app:
-                lib.mapAttrs (n: p: render.renderProvider app n p) providers
-              );
             in
             ''
-              printf '%s\n' ${lib.escapeShellArg (builtins.toJSON { profiles = resolved; providers = rendered; })} \
-                | ${pkgs.jq}/bin/jq -e '.profiles and .providers' > /dev/null
-              echo 'profiles + providers resolve and render in all dialects' >&2
+              printf '%s\n' ${lib.escapeShellArg (builtins.toJSON rendered)} \
+                | ${pkgs.jq}/bin/jq -e 'map_values(.provider) | length == ${toString (builtins.length (builtins.attrNames profiles))}' > /dev/null
+              echo 'every profile resolves and renders a complete world' >&2
               touch $out
             ''
             )
@@ -282,7 +286,7 @@
       # re-deriving it.
       lib.data = data // {
         profiles = import ./data/profiles.nix;
-        ccswitch = (import ./lib/ccswitch.nix) lib;
+        worlds = (import ./lib/worlds.nix) lib;
       };
 
       # agent-skills' library, for a client that wants a bundle shape of its own.

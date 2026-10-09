@@ -85,16 +85,10 @@
           }
         );
         default = {
-          # The default endpoint: also what environment.sessionVariables
-          # publishes as ANTHROPIC_BASE_URL on NixOS.
-          claude = {
-            provider = "neoplatform";
-          };
-          claude-free = {
-            provider = "free";
-          };
           # Per-folder setup instead of a one-shot claude run: it persists the
-          # same env into ./.claude/settings.local.json, then exits.
+          # same env into ./.claude/settings.local.json, then exits. (The `claude`
+          # command itself is built by modules/worlds.nix and follows the active
+          # profile, so it is not pinned to a provider here.)
           writing = {
             provider = "custom";
             script = ../data/scripts/writing.sh;
@@ -104,7 +98,9 @@
           Provider-pinned commands, keyed by the command name to install. Each
           exports its provider's ANTHROPIC_* env for its own process only —
           overriding whatever the shell exports — and then execs claude, or the
-          `script` when one is given.
+          `script` when one is given. `claude` itself is profile-driven
+          (modules/worlds.nix); this is for the fixed, per-task helpers like
+          `writing`.
         '';
       };
     };
@@ -113,45 +109,24 @@
       type = lib.types.attrs;
       default = import ../data/profiles.nix;
       description = ''
-        Profile registry (data/profiles.nix). A profile names providers, mcp
-        servers, skills and prompts that a single `profile <name>` call
-        activates across claude/opencode/pi. Profiles are dialect-free and
-        resolved against `agent.providers` / `agent.mcp` / `agent.skills.sources`
-        by `modules/ccswitch.nix`; `extends` inherits (checked) another profile.
-        Consumers merge: `agent.profiles = lib.data.profiles // { mine = …; };`.
+        Profile registry (data/profiles.nix). A profile names a provider, MCP
+        servers/groups and skill sources; `lib/worlds.nix` renders each into a
+        complete snapshot of the machine-wide config that `profile <name>`
+        installs. Profiles are dialect-free and resolved against
+        `agent.providers` / `agent.mcp` / the merged agent-skills sources;
+        `extends` inherits (checked) another profile. Consumers merge:
+        `agent.profiles = lib.data.profiles // { mine = …; };`.
       '';
     };
 
-    ccSwitch = {
-      enable = lib.mkEnableOption ''
-        Drive provider/MCP/skill/prompt management for claude/opencode/pi through
-        cc-switch-cli (nixpkgs). When on, the runtime compiles the registries
-        into cc-switch records on activation and ships `profile`/`provider`
-        commands that wrap cc-switch verbs; cc-switch owns the live config files
-        its service layer writes, the runtime keeps only the pi files cc-switch
-        disclaims (settings.json default model + ~/.pi/agent/mcp.json) and the
-        static opencode keys + plugin list. Off by default here.
-      '' // { default = false; };
-
-      package = lib.mkOption {
-        type = lib.types.package;
-        default = null;
-        defaultText = lib.literalExpression "pkgs.cc-switch-cli";
-        description = ''
-          cc-switch-cli package to drive. Null falls back to `pkgs.cc-switch-cli`
-          in `modules/ccswitch.nix` when enabled. Override to pin a version or
-          swap a fork.
-        '';
-      };
-
-      # Internal: resolved-profile JSON per name, consumed by the `profile`
-      # shim. Built only when enabled, so hosts that leave it off get no farm.
-      profileShards = lib.mkOption {
-        type = lib.types.attrsOf lib.types.path;
-        default = { };
-        internal = true;
-        description = "Resolved profile JSON (after extends expansion + mcp group expansion), per profile name.";
-      };
+    defaultProfile = lib.mkOption {
+      type = lib.types.str;
+      default = "work";
+      description = ''
+        Profile installed on first activation (and whenever no world is active
+        yet). After a user runs `profile <name>`, activation converges to that
+        world instead, so a rebuild never resets their choice.
+      '';
     };
   };
 }

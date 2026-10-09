@@ -37,6 +37,7 @@ nothing but the binaries and `AGENT_*_TOKEN` env vars.
 - [Quick start](#quick-start)
 - [Using the runtime](#using-the-runtime)
 - [Providers](#providers)
+- [Profiles](#profiles)
 - [Skills](#skills)
 - [Configuration options](#configuration-options)
 - [What lands on disk](#what-lands-on-disk)
@@ -50,7 +51,7 @@ nothing but the binaries and `AGENT_*_TOKEN` env vars.
 ### Container / standalone
 
 ```bash
-nix profile install github:turbcool/agent-runtime#agent-runtime             # pi, opencode, mcp, claude, claude-free, writing
+nix profile install github:turbcool/agent-runtime#agent-runtime             # pi, opencode, claude, profile, mcp, writing, skills
 nix build github:turbcool/agent-runtime#agent-runtime-config                # rendered config + skill trees, for COPY in a Dockerfile
 nix run github:turbcool/agent-runtime#install                               # one command: install binaries, copy config, seed npm, report missing tokens
 nix develop github:turbcool/agent-runtime                                  # ad-hoc shell (jq, nixfmt, statix)
@@ -123,9 +124,9 @@ a container built from `#agent-runtime` — these are the commands and the choic
 |---|---|
 | `pi` | the pi coding agent (its wrapper hides pi's `web_crawl` tool) |
 | `opencode` | the opencode agent |
-| `claude` | Claude Code on the **neoplatform** endpoint, npm MCP servers wired in |
-| `claude-free` | the same, repointed at the **free** endpoint / free-account token |
-| `writing` | Claude Code + `data/scripts/writing.sh` — merges this run's env into the project's `.claude/settings.local.json` |
+| `claude` | Claude Code, pointed at **whatever provider the active profile selects** (its wrapper reads the active world and injects the env) |
+| `profile <name>` | switch every agent at once to a named world (see [Profiles](#profiles)) |
+| `writing` | Claude Code + `data/scripts/writing.sh` — merges the `custom` provider env into the project's `.claude/settings.local.json` and installs the ARIS research skills for that folder |
 | `mcp <group\|server>` | merge a rendered MCP fragment into the **current project's** `opencode.json` (`mcp nixos`, `mcp frontend`) |
 | `skills <source>` / `skills-install-<source>` | install a skill source into the current project |
 
@@ -135,26 +136,51 @@ Three providers ship — `neoplatform`, `custom`, `free` ([full table](#provider
 On NixOS their keys are decrypted to `/run/agenix/<id>-token`; in a container,
 export `AGENT_NEOPLATFORM_TOKEN`, `AGENT_CUSTOM_TOKEN`, `AGENT_FREE_TOKEN`.
 
-- **Claude Code** — pick with the command: `claude` → `neoplatform`,
-  `claude-free` → `free`, `writing` → `custom`.
-- **pi and opencode** — pick in Nix as `provider/model`, one line each:
-  `agent.defaultModel` (default `"free/main"`) and `agent.smallModel`
-  (default `"custom/qwen3-coder-next"`), e.g. `neoplatform/deepseek-v4-flash`.
-  Rebuild and both agents follow.
+You normally pick one by **switching profile** (`profile work` → neoplatform,
+`profile free`/`profile study` → free); the active profile's provider is applied
+to claude, pi and opencode together, and the wrapper injects the matching key
+from agenix at launch (never a key in a file). `writing` is the one command
+pinned to `custom`, because it sets up a single folder for research writing.
+
+## Profiles
+
+A **profile** is a named, complete "world" of machine-wide state: one provider,
+a set of MCP servers, and a set of skill sources. `data/profiles.nix` ships three:
+
+| Profile | Provider | Skills | MCP |
+|---|---|---|---|
+| `work` | `neoplatform` | `ponytail` (+5 `ponytail-*`), `archify`, `archify-review`, `i-have-adhd` | always-on only |
+| `free` | `free` | same coding set as `work` | always-on only |
+| `study` | `free` | — (ARIS comes per-project via `writing`) | `donsetch` |
+
+`profile <name>` installs that world into `$HOME` atomically — it copies the
+pre-rendered config files and re-points the three skill link-trees — so all
+three agents move together and a `nixos-rebuild` (which re-installs the *active*
+world) never resets your choice. `donsetch` and `bladebro` (the npm MCP set) are
+on in every world.
+
+Add a profile by extending the registry (nothing else changes):
+
+```nix
+agent.profiles = lib.data.profiles // {
+  side = { provider = "free"; skills = [ "ponytail" ]; mcp = [ "nixos" ]; };
+};
+agent.defaultProfile = "side";   # optional: what a fresh machine starts on
+```
+
+A profile naming a provider/mcp/skill that doesn't resolve fails
+`checks.worlds-resolve` at build time (skills) or an HM assertion — never a
+silent half-switch.
 
 ### What's always on
 
 - **MCP** — `donsetch` (fetch/search/crawl) and `bladebro` (stealth browser) are
-  wired into every agent, always. The rest (`nixos`, `daisyui`, `svelte`,
+  wired into every agent in every world. The rest (`nixos`, `daisyui`, `svelte`,
   `lucide-icons`, and the `frontend` / `nixos` groups) is opt-in per project with
   `mcp <group|server>`.
-- **Skills** — ten ship with the runtime (`archify`, `archify-review`,
-  `i-have-adhd`, `qmd`, `ponytail` + five `ponytail-*`), plus whatever a host
-  adds (e.g. `orca`). `skills <source>` installs a source into a project.
-
-Switching a provider from the shell (`provider <id>` / `profile <name>` via
-cc-switch) is the next cutover; until then, pick with the pinned commands or
-`agent.defaultModel`.
+- **Skills** — the runtime ships `archify`, `archify-review`, `i-have-adhd`,
+  `qmd`, `ponytail` + five `ponytail-*`; a profile selects which of them are
+  machine-wide. `skills <source>` installs any source into a project on top.
 
 ## Providers
 
@@ -225,27 +251,22 @@ Consequences worth keeping:
 
 ### Provider-pinned commands
 
-`agent.claudeCode.commands` is an attrsOf record; the attr name is the command to
-install, and the record says which provider it talks to and what it runs
-afterwards:
+The main `claude` command is **profile-driven**, not provider-pinned: it reads
+the active world's provider and injects that provider's `ANTHROPIC_*` for its
+own process (see [Profiles](#profiles)). What remains in
+`agent.claudeCode.commands` is for the rare helper that must always talk to
+one fixed endpoint:
 
 | Command | Provider | Runs |
 |---|---|---|
-| `claude` | `neoplatform` (also the default endpoint, see below) | the real claude, with the npm MCP servers |
-| `claude-free` | `free` | the same, repointed at the free endpoint with the free-account token |
-| `writing` | `custom` | `data/scripts/writing.sh` — merges the same env into `./.claude/settings.local.json` (mode 0600) and prints the follow-up steps |
+| `writing` | `custom` | `data/scripts/writing.sh` — merges the env into `./.claude/settings.local.json` (mode 0600), links the ARIS research skills into the folder, and prints the follow-up steps |
 
-Each exports its provider's `ANTHROPIC_*` for its own process and therefore
-overrides any global shell export, so one binary serves several endpoints
-without global state. `writing` gets the identical env for free: its bash reads
-`ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` / the tier variables the record
-already rendered, which is why no model id is named twice.
+Each such command exports its provider's `ANTHROPIC_*` only for its own process,
+so it overrides any global shell export without touching global state. `writing`
+reads `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` / the tier variables the record
+already rendered, so no model id is named twice.
 
-The real `claude` is reachable only through these commands (they exec it by
-absolute store path), so there is no option to put the unwrapped binary on PATH
-— it would collide with `claude`.
-
-To add a command:
+To add one:
 
 ```nix
 agent.claudeCode.commands.claude-pro = { provider = "neoplatform"; };
@@ -312,8 +333,10 @@ turbcool/nixos' `config/skills.nix`).
 | `agent.plugins` | attrs | `data/plugins.nix` | Claude Code marketplaces + enabled plugins (NixOS side) plus `opencodePlugins`, the repo names `modules/home.nix` loads into opencode.json. All three are derived from one `community` list |
 | `agent.agents.includeTui` | bool | `true` | also install `agent-deck`; off for slim/headless bundles |
 | `agent.npmPrefix` | str | `"$HOME/.npm"` | where npm installs; its `bin/` holds the `npm` MCP servers, so this is the single source for their absolute paths, for `home.sessionPath` and for the activation hook that installs them |
-| `agent.claudeCode.enable` | bool | `true` | install the provider-pinned commands |
-| `agent.claudeCode.commands` | attrsOf `{ provider, script ? null }` | `claude`, `claude-free`, `writing` | one command per provider; the attr name is the command, `script` replaces the claude exec (see above) |
+| `agent.claudeCode.enable` | bool | `true` | install the fixed per-task commands |
+| `agent.claudeCode.commands` | attrsOf `{ provider, script ? null }` | `writing` | fixed provider-pinned helpers; the main `claude` command is profile-driven (see [Profiles](#profiles)), so this is only for commands pinned to one endpoint (`writing`) |
+| `agent.profiles` | attrs | `data/profiles.nix` | profile registry: `{ provider, mcp = [...], skills = [...] }` per name; each is rendered into a complete world and installed by `profile <name>` (see [Profiles](#profiles)) |
+| `agent.defaultProfile` | str | `"work"` | the world installed on first activation, and when no profile is active yet; a rebuild re-installs the *active* world, never this one |
 
 Internal: `agent.runtimeFiles`, `agent.runtimePackages`, `agent.skillTools`,
 `agent.mcpCommand` — computed, read-only.
@@ -361,7 +384,7 @@ Also writes, without an option of its own:
 
 ### Not an option: the pi package list
 
-`~/.pi/agent/settings.json` is force-managed and its `packages` array (pi-zentui,
+The world's `settings.json` carries the `packages` array (pi-zentui,
 donsetch, `@ff-labs/pi-fff`, `@piex-dev/init`,
 `@juicesharp/rpiv-ask-user-question`) has no option behind it. Add an extension
 by editing that file with a small `home.file` override, not by patching the
@@ -370,20 +393,25 @@ module. `~/.pi/agent/zentui.json` and any extension's own config under
 
 ## What lands on disk
 
-Managed (reverted on every activation):
+Managed by the active **world** (`modules/worlds.nix`), reinstalled on every
+activation and on every `profile <name>`:
 
 | Path | Written by | Note |
 |---|---|---|
-| `~/.pi/agent/models.json` | `modules/home.nix` | providers + models, read-only for pi, so not force-managed |
-| `~/.pi/agent/settings.json` | `modules/home.nix` | force-managed: default provider/model, `enabledModels` (hides bundled models so `/model` and Ctrl+P only cycle ours), `packages` |
-| `~/.pi/agent/pi-fff.json` | `modules/home.nix` | `@ff-labs/pi-fff` mode `override`: swaps pi's find/grep for `fffind`/`ffgrep`, adds `multi_grep` |
-| `~/.config/opencode/opencode.json` | `modules/home.nix` | force-managed: providers, models, permissions, compaction, the `opencodePlugins` list, and the two npm MCP servers with absolute paths. The rest of `data/mcp.nix` is not written here — `mcp <group\|server>` merges it into the *project's* `opencode.json` |
-| `.agents/skills`, `.claude/skills`, `.config/opencode/skills` | `modules/skills.nix` | agent-skills symlink trees |
-| `/etc/claude-code/managed-settings.json` | NixOS | see above |
+| `~/.config/opencode/opencode.json` | the installed world | provider + model + static keys + the npm MCP servers, all with absolute paths; the *project's* `opencode.json` is where `mcp <group\|server>` merges extra servers |
+| `~/.pi/agent/models.json` | the installed world | all providers + models, read-only for pi |
+| `~/.pi/agent/settings.json` | the installed world | default provider/model of the world's provider, `enabledModels`, `packages` |
+| `~/.pi/agent/mcp.json` | the installed world | the always-on npm MCP servers in pi's dialect |
+| `~/.pi/agent/pi-fff.json` | the installed world | `@ff-labs/pi-fff` mode `override` |
+| `.agents/skills`, `.claude/skills`, `.config/opencode/skills` | the installed world | symlink trees of the profile's selected skill sources |
+| `/etc/claude-code/managed-settings.json` | NixOS | immutable Claude Code plugins (see above) |
 | `/run/agenix/<provider>-token` | NixOS + agenix | 0400, decrypted at activation |
 
-The first four are one table (`fileSpecs`) that feeds both `home.file` and
-`runtimeFiles`, so the desktop login and the container bundle cannot drift.
+These are one pre-rendered snapshot per profile (`lib/worlds.nix`), so the
+desktop login, the container bundle (`agent-runtime-config`) and every `profile`
+switch all read the same bytes — and `~/.claude.json` / `~/.claude/settings.json`
+stay **user-owned** (claude is driven by the `claude` wrapper + `--mcp-config`,
+not by a written settings file).
 
 User-owned on purpose, so the agents' own write paths keep working: pi's
 `auth.json`, `sessions/`, `git/`, `npm/`, `zentui.json`, `~/.claude/settings.json`,
@@ -449,15 +477,15 @@ inputs.
 | `packages.agent-runtime-config` | the rendered config + skill trees, a `linkFarm` for `COPY` |
 | `packages.install` | no-argument installer: bundle on PATH, config into `$HOME`, seed npm, report missing tokens |
 | `packages.mcp` | just the `mcp` command, for a client that already has the bundle |
-| `lib.data` | the registries (`providers`, `mcp`, `plugins`, `skills`) so a client extends a record instead of re-deriving it |
+| `lib.data` | the registries (`providers`, `mcp`, `plugins`, `skills`, `profiles`) plus `lib.data.worlds` (the pure renderer), so a client extends a record instead of re-deriving it |
 | `lib.agentSkills` | agent-skills' library, for a client that wants a bundle shape of its own |
-| `checks` | `bundle-contains-agents`, `mcp-servers-exist` |
+| `checks` | `bundle-contains-agents`, `mcp-servers-exist`, `worlds-resolve` |
 | `devShells.default` | jq, nixfmt, statix |
 
 ## Checks, dev, gotchas
 
 ```bash
-nix flake check            # bundle-contains-agents, mcp-servers-exist
+nix flake check            # bundle-contains-agents, mcp-servers-exist, worlds-resolve
 nix develop                # jq, nixfmt, statix
 ```
 
@@ -467,6 +495,10 @@ nix develop                # jq, nixfmt, statix
 - `mcp-servers-exist` keeps the registry honest: every `package`-backed server
   must name a package that really exists in `pkgs`, so a typo in `data/mcp.nix`
   fails a check instead of a user's build.
+- `worlds-resolve` resolves every bundled profile (extends + MCP-group expansion)
+  and renders each into a full world, so a bad provider/mcp name or an `extends`
+  cycle fails a check instead of a `profile` call. Skill names are checked
+  against the merged source set by an HM assertion, which a host can extend.
 - Config correctness is asserted by the modules themselves instead, so it is
   checked for *every* consumer — not only for the defaults a flake check can
   see.

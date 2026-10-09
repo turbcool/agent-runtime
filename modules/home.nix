@@ -8,20 +8,32 @@
 # module input, this file is a plain *path* — Nix' module system dedupes
 # identical paths, so a host may import `homeModules.default` itself and still
 # get the module injected once through `home-manager.sharedModules`.
+#
+# The machine-wide config (opencode.json, pi settings/models/mcp, skill trees,
+# and the `claude` wrapper that follows the active profile) is owned by
+# modules/worlds.nix as a baked "world"; this file keeps only what the world
+# deliberately does NOT own: the per-project mcp farm + command, the binaries,
+# and the fixed per-task commands (`writing`).
 { runtimeInputs, config, lib, pkgs, ... }:
 
 let
   cfg = config.agent;
   inherit (cfg) providers;
 
+  # opencode's "provider/model" split, used only by the assertion below (the
+  # world's own model rendering is lib/worlds.nix's job).
+  defaultModel = lib.splitString "/" cfg.defaultModel;
+
+  W = import ../lib/worlds.nix lib;
+
   inherit (pkgs.stdenv.hostPlatform) system;
   llmAgents = runtimeInputs.llm-agents.packages.${system};
   realClaude = runtimeInputs.claude-code.packages.${system}.default;
 
   # npm installs into $HOME/.npm on NixOS (programs.npm + /etc/npmrc), which is
-  # where the `npm` MCP servers' binaries live. One option, three uses: the two
-  # MCP renderers (as an absolute path), home.sessionPath (as a shell string, so
-  # a container gets it too) and the activation hook that installs them.
+  # where the `npm` MCP servers' binaries live. One option, three uses: the MCP
+  # renderers (as an absolute path), home.sessionPath (as a shell string, so a
+  # container gets it too) and the activation hook that installs them.
   npmBin = "${cfg.npmPrefix}/bin";
   npmBinPath = lib.replaceStrings [ "\$HOME" ] [ config.home.homeDirectory ] npmBin;
 
@@ -29,7 +41,8 @@ let
   # One provider field (tokenSource) -> the three dialects each agent speaks.
   # `command` and `shell` are evaluated at request/launch time, so the token is
   # read fresh from the env or the agenix store path and never baked into a
-  # config file in the store.
+  # config file in the store. (The per-agent renderers live in lib/worlds.nix;
+  # this map only feeds the `writing` command's env below.)
   tokenSyntax = lib.mapAttrs (
     _: p:
     let
@@ -45,109 +58,17 @@ let
       {
         # "$VAR" — expanded by the shell at launch time, so the key itself never
         # appears in the command script. (`\$` escapes the Nix interpolation.)
-        shell = "\"\$${ts.env}\"";
+        shell = "\"$${ts.env}\"";
         command = "!printenv ${ts.env}";
         opencode = "{env:${ts.env}}";
       }
   ) providers;
 
-  # --- pi ------------------------------------------------------------------
-  # pi names its model fields differently from opencode:
-  # opencode's limit.context/limit.output are pi's contextWindow/maxTokens.
-  # Both are required — data/providers.nix states every model's limits.
-  toPiModel = id: m: {
-    inherit id;
-    name = m.name or id;
-    contextWindow = m.limit.context;
-    maxTokens = m.limit.output;
-  };
-
-  # Every provider in data/providers.nix is an OpenAI-compatible proxy. Verified
-  # live: {url}/v1/models answers 200 with a bearer token for all three, and
-  # llm-free only answers on /v1 — so normalise rather than trusting p.url.
-  toPiProvider = name: p: {
-    baseUrl = "${lib.removeSuffix "/v1" p.url}/v1";
-    api = "openai-completions";
-    # "!command" is read at request time and never cached, so the decrypted
-    # agenix token (or the env var) exists only in pi's memory — nothing to
-    # leak via a JSON file. auth.json would take precedence, so don't run
-    # /login for these.
-    apiKey = tokenSyntax.${name}.command;
-    models = lib.mapAttrsToList toPiModel (p.models or { });
-  };
-
-  # llm.defaultModel is opencode's "provider/model" form; pi wants them apart.
-  defaultModel = lib.splitString "/" cfg.defaultModel;
-
-  piModels = pkgs.writeText "pi-models.json" (
-    builtins.toJSON {
-      providers = lib.mapAttrs toPiProvider providers;
-    }
-  );
-
-  piSettings = pkgs.writeText "pi-settings.json" (
-    builtins.toJSON {
-      defaultProvider = lib.head defaultModel;
-      defaultModel = lib.last defaultModel;
-
-      # Hides every other model from /model and pins Ctrl+P cycling to our own
-      # providers. A shell exporting ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL
-      # makes pi report the built-in `anthropic` provider as ready, and every
-      # bundled Claude model then shows up pointing at the claude-code proxy.
-      # The provider-pinned commands keep the key out of the shell environment,
-      # so this is a guard now rather than a fix — delete it once pi behaves
-      # with it gone.
-      enabledModels = lib.mapAttrsToList (name: _: "${name}/*") providers;
-
-      # pi npm-installs declared packages that are missing or out of date on
-      # startup (package-manager.js installMissing), so listing them here is
-      # enough — no activation hook needed. A network-less container therefore
-      # needs its npm packages pre-seeded or it fails on first boot.
-      #
-      # pi-zentui — full TUI skin, supersedes @narumitw/pi-starship. Its config
-      # (~/.pi/agent/zentui.json) is written by pi's /zentui, so it stays
-      # user-owned like auth.json. Its Thinking (Experimental) renderer is tested
-      # against pi 0.85/0.87 and may misbehave on pi 1.x — disabled by default.
-      # donsetch — web_fetch/search/crawl/screenshot as native tools. Its
-      # prebuilt Rust binary is glibc, which programs.nix-ld covers on NixOS.
-      # @ff-labs/pi-fff — Rust/SIMD FFF search replacing pi's find/grep; mode
-      # config below. linux-x64-gnu prebuilds match, nothing is compiled here.
-      # @piex-dev/init — /init prompt template that writes the repo's AGENTS.md.
-      # Prompt-only, so it costs nothing per request.
-      # @juicesharp/rpiv-ask-user-question — one tool, ask_user_question: a
-      # tabbed dialog of up to 4 typed-option questions. No config written.
-      packages = [
-        "npm:pi-zentui"
-        "npm:donsetch"
-        "npm:@ff-labs/pi-fff"
-        "npm:@piex-dev/init"
-        "npm:@juicesharp/rpiv-ask-user-question"
-      ];
-
-      # Skills and extensions are plain files in the agent dir — declare them
-      # next to this module when there are any. Directories are copied, single
-      # files are symlinked (edit, then /reload inside pi).
-      # home.file.".pi/agent/skills/my-skill" = { source = ../data/pi/skills/my-skill; recursive = true; };
-      # home.file.".pi/agent/extensions/foo.ts".source = ../data/pi/extensions/foo.ts;
-    }
-  );
-
-  # https://pi.dev/packages/@ff-labs/pi-fff
-  # "override" swaps pi's built-in find/grep for fffind/ffgrep and adds
-  # multi_grep. pi reads this file before registering tools, and /fff-mode only
-  # changes the running session (mode changes also want a /reload) — so this
-  # file, not the session, is the place the mode is set.
-  piFff = pkgs.writeText "pi-fff.json" (
-    builtins.toJSON {
-      mode = "override";
-    }
-  );
-
   # --- MCP ------------------------------------------------------------------
-  # One registry (data/mcp.nix), one renderer, three delivery routes:
-  #   * npm — npm-installed binaries in npmPrefix/bin, written into
-  #     opencode.json *and* into each provider-pinned command's --mcp-config,
-  #     so every agent has them;
+  # One registry (data/mcp.nix), one renderer (lib/worlds.nix's toOcMcp, so the
+  # world and this per-project farm can never drift), two delivery routes:
+  #   * npm — npm-installed binaries in npmPrefix/bin, exposed to every agent
+  #     (written into the world by modules/worlds.nix);
   #   * servers/groups — opt-in per project through the `mcp` command, whose
   #     farm below holds one rendered fragment per name.
   #
@@ -166,35 +87,6 @@ let
     lib.filterAttrs (_: srv: srv ? package) cfg.mcp.servers
   );
 
-  # The single opencode dialect mapping. Both opencode.json and the farm below
-  # go through it, so an entry cannot render differently in the two.
-  toOpencodeMcp =
-    name: srv:
-    if srv ? url then
-      {
-        type = "remote";
-        url = srv.url;
-        enabled = true;
-      }
-    else if cfg.mcp.npm ? ${name} then
-      {
-        type = "local";
-        command = [ (npmCmd srv) ] ++ srv.args;
-        enabled = true;
-      }
-    else if srv ? package then
-      {
-        type = "local";
-        command = [ "${mcpPackages.${name}}/bin/${builtins.head srv.command}" ] ++ lib.tail srv.command;
-        enabled = true;
-      }
-    else
-      {
-        type = "local";
-        inherit (srv) command;
-        enabled = true;
-      };
-
   mcpConfigDir = pkgs.linkFarm "agent-runtime-mcp-configs" (
     lib.mapAttrsToList (name: src: {
       name = "${name}.json";
@@ -207,7 +99,7 @@ let
             mcp = lib.listToAttrs (
               map (member: {
                 name = member;
-                value = toOpencodeMcp member cfg.mcp.servers.${member};
+                value = W.toOcMcp cfg.mcp npmBinPath mcpPackages member;
               })
               members
             );
@@ -254,48 +146,6 @@ let
     echo "✓ MCP servers activated: $1"
   '';
 
-  # --- opencode ------------------------------------------------------------
-  # The npm set lands here through the renderer above; the rest of the registry
-  # is per-project, merged in by `mcp <group|server>`.
-  opencodeJson = pkgs.writeText "opencode.json" (
-    builtins.toJSON (
-      {
-        "$schema" = "https://opencode.ai/config.json";
-        permission = {
-          webfetch = "allow";
-          websearch = "allow";
-          lsp = "allow";
-        };
-        compaction.reserved = 16000;
-        plugin = map (
-          name: "${runtimeInputs.${name}.outPath}/.opencode/plugins/${name}.mjs"
-        ) cfg.plugins.opencodePlugins;
-        agent.explore.model = cfg.smallModel;
-        mcp = lib.listToAttrs (
-          lib.mapAttrsToList (name: srv: {
-            inherit name;
-            value = toOpencodeMcp name srv;
-          }) cfg.mcp.npm
-        );
-      }
-      // {
-        provider = lib.mapAttrs (name: p: {
-          inherit name;
-          npm = "@ai-sdk/openai-compatible";
-          models = p.models or { };
-          options = {
-            baseURL = p.url;
-            apiKey = tokenSyntax.${name}.opencode;
-          };
-        }) providers;
-      }
-      // {
-        model = cfg.defaultModel;
-        small_model = cfg.smallModel;
-      }
-    )
-  );
-
   # --- binaries ------------------------------------------------------------
   # Hides donsetch's web_crawl from pi. pi has no settings key for this —
   # `defaultTools` cannot do it either, because AgentSession passes
@@ -307,16 +157,11 @@ let
     makeWrapper ${llmAgents.pi}/bin/pi "$out/bin/pi" --add-flags "--exclude-tools web_crawl"
   '';
 
-  # --- provider-pinned commands -------------------------------------------
-  # `claude`, `claude-free`, `writing`: each exports one provider's ANTHROPIC_*
-  # env for its own process — overriding any global shell export — and then runs
-  # either the real claude (with the npm MCP servers, see below) or the script
-  # the record names. One binary, several endpoints, no global state.
-  #
-  # Claude Code MCP config, built from the same npm-installed set
-  # (data/mcp.nix) that opencode.json gets, in Claude Code's dialect (it infers
-  # stdio from `command`) and with absolute $HOME/.npm/bin paths. No secrets are
-  # resolved here; a server that needs one gets it from the command's env.
+  # --- fixed per-task commands --------------------------------------------
+  # `writing` (and any consumer-declared command) exports one provider's
+  # ANTHROPIC_* env for its own process — overriding any global shell export —
+  # and runs the named script. The main `claude` command is NOT here: it is
+  # profile-driven (modules/worlds.nix), reading the active world's provider.
   claudeMcpConfig = pkgs.writeText "claude-code-mcp.json" (
     builtins.toJSON {
       mcpServers = lib.mapAttrs (
@@ -366,42 +211,6 @@ let
     lib.optionalAttrs cfg.claudeCode.enable cfg.claudeCode.commands
   );
 
-  # Rendered config as store files, so the standalone container output can ship
-  # them verbatim instead of re-implementing any of the rendering above.
-  #
-  # One table, two consumers: `runtimeFiles` ships these paths in the
-  # `agent-runtime-config` package, `home.file` writes them into a desktop
-  # login — same paths, same sources, nothing to keep in sync by hand.
-  #
-  # Same trick for the binaries: `agent.runtimePackages` is what we contribute
-  # to home.packages, which keeps Home Manager's own baseline (man-db,
-  # shared-mime-info, the HM reference manpage) out of the container bundle
-  # while the two stay identical in content.
-  fileSpecs = {
-    # ~/.pi/agent/ is split deliberately. models.json is fully declarative here
-    # — pi only ever reads it — while settings.json is force-managed just like
-    # ~/.config/opencode/opencode.json, so changes made from pi's /settings are
-    # reverted on the next activation. auth.json, sessions/, git/ and npm/ stay
-    # user-owned so pi's own /login, pi install and session writes work.
-    ".pi/agent/models.json" = {
-      source = piModels;
-    };
-    ".pi/agent/settings.json" = {
-      source = piSettings;
-      force = true;
-    };
-    ".pi/agent/pi-fff.json" = {
-      source = piFff;
-      force = true;
-    };
-    ".config/opencode/opencode.json" = {
-      source = opencodeJson;
-      force = true;
-    };
-  };
-
-  runtimeFiles = lib.mapAttrs (_: spec: spec.source) fileSpecs;
-
   runtimePackages =
     commands
     ++ [
@@ -412,30 +221,29 @@ let
     ++ builtins.attrValues mcpPackages
     # modules/skills.nix builds the per-project installers and the `skills`
     # dispatcher from the merged source set.
-    ++ [ config.agent.skillTools ]
-    ++ lib.optionals cfg.agents.includeTui [ llmAgents.agent-deck ];
+    ++ [ config.agent.skillTools ];
 in
 {
   imports = [
     ./options.nix
     (import ./skills.nix { inherit runtimeInputs; })
-    # cc-switch engine: inert unless agent.ccSwitch.enable. Importing it here
-    # declares agent.ccSwitch.* for every consumer; the module body only
-    # contributes runtimePackages/activation when enabled.
-    ./ccswitch.nix
+    # Worlds: the pre-rendered provider/mcp/skill snapshots + the `profile`
+    # command and the profile-following `claude` wrapper. Owns every
+    # machine-wide config file (see the module header).
+    ./worlds.nix
   ];
 
   options.agent = {
     defaultModel = lib.mkOption {
       type = lib.types.str;
       default = "free/main";
-      description = "opencode's `provider/model` form. pi splits it apart.";
+      description = "opencode's `provider/model` form. pi splits it apart. The world's provider normally overrides this per profile; kept as the standalone fallback.";
     };
 
     smallModel = lib.mkOption {
       type = lib.types.str;
       default = "custom/qwen3-coder-next";
-      description = "Small/subagent tier for pi and opencode. One line moves both agents.";
+      description = "Small/subagent tier for pi *and* opencode. One line moves both agents.";
     };
 
     agents.includeTui = lib.mkOption {
@@ -467,12 +275,12 @@ in
   };
 
   config = {
-    agent.runtimeFiles = runtimeFiles;
+    agent.runtimeFiles = { };
     agent.runtimePackages = runtimePackages;
 
     home = {
       packages = config.agent.runtimePackages;
-      file = fileSpecs;
+      file = { };
       sessionPath = [ npmBin ];
 
       # The npm-installed MCP servers are not Nix packages — they are binaries
@@ -486,7 +294,7 @@ in
         }; do
           [ -x "$cmd" ] || {
             $DRY_RUN_CMD ${pkgs.nodejs}/bin/npm install --prefix "${cfg.npmPrefix}" -g \
-              ${lib.concatStringsSep " " (builtins.attrNames cfg.mcp.npm)}
+            ${lib.concatStringsSep " " (builtins.attrNames cfg.mcp.npm)}
             break
           }
         done

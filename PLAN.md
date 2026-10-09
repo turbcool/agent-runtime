@@ -1,103 +1,114 @@
-# Profiles + cc-switch cutover — plan
+# Profiles as pre-rendered worlds — design + outcome
 
-Goal: `profile <name>` / `provider <name>` shell commands that activate a bundle of
-tools across claude / opencode / pi, backed by cc-switch-cli (nixpkgs) as the
-runtime owner of live config files, with the agent-runtime flake remaining the
-*declarative compiler* (registries + providers + skills stay in Nix).
+**Status: shipped.** This file records the design that replaced the cc-switch
+cutover, and the cc-switch findings that motivated it (those stay useful as
+evidence about how the agents actually read config).
 
-## What cc-switch-cli actually does (verified, v5.10.5)
+## The architecture
 
-- `cc-switch --app <app> provider add --id X --name N --config-file <json>` — **non-interactive**,
-  `--config-file` is parse-only (no key validation). Confirmed key-less claude
-  records are accepted; `{file:…}`/`!cat`/`!printenv` expressions are stored
-  verbatim and NOT evaluated by cc-switch.
-- `--app` accepts `claude`, `codex`, `gemini`, `open-code`, `hermes`, `open-claw`, `pi`.
-- MCP is written per app; `--app pi mcp …` **errors: "does not support pi"** —
-  `services/mcp.rs` arms `AppType::Pi => {}` are no-ops, `pi_config/` has no
-  mcp.json path. → pi `mcp.json` stays the runtime's.
-- `provider` writes: claude `~/.claude/settings.json` (env+model), opencode
-  `~/.config/opencode/opencode.json` (provider/mcp are read-modify-written,
-  unknown keys preserved), pi `~/.pi/agent/models.json` (additive providers,
-  **with optimistic revision lock** — two concurrent writers fail).
-- `provider add` for pi does NOT touch `defaultProvider`/`defaultModel` —
-  `pi_config/mod.rs:3`: *"Pi owns account login and the active provider/model in
-  settings.json. CC Switch only manages explicit provider entries in
-  models.json."*
-- Claude Code: `settings.json.env` **beats** the process environment (verified —
-  sending `${FOO}` literal; not expanded; and a process env key is overridden by
-  the settings.json key). Keys are NEVER expanded.
+A **profile** is a named, complete "world" of machine-wide state: one provider,
+a set of MCP servers, a set of skill sources. `lib/worlds.nix` renders each
+profile into a full snapshot of every machine-wide config file; `modules/worlds.nix`
+bakes one directory per profile and ships `profile <name>`, which installs a
+world by copying it.
 
-## Ownership (final)
+```
+data/profiles.nix ─┐
+data/providers.nix ├─► lib/worlds.nix (pure) ─► one baked dir per profile ─► profile <name>
+data/mcp.nix ──────┤                              ($WORLDS/<name>/…)          │  copies it into $HOME
+merged skill srcs ─┘                                                        └─ and re-points the
+                                                                                3 skill link-trees
+```
 
-| artifact | owner |
+Principles:
+
+1. **One writer per file.** The world is the only thing that writes
+   `opencode.json`, `~/.pi/agent/{models,settings,mcp,pi-fff}.json` and the
+   skill trees. `modules/home.nix` force-writes none of them.
+2. **Switching is a file copy, not a diff.** Installing the same world twice is
+   byte-identical (verified), so activation converges by construction.
+3. **Activation follows the user.** It re-installs the *active* world (read from
+   `~/.local/state/agent-runtime/world`), falling back to `agent.defaultProfile`
+   only on a fresh machine — a rebuild never resets a `profile` choice.
+4. **No imperative DB in the write path.** No seed marker, no per-server
+   `set-apps` loops, no state that can drift from the files.
+
+### What a world owns — and what it deliberately doesn't
+
+| Path | Owner |
 |---|---|
-| `~/.cc-switch/cc-switch.db` | cc-switch |
-| claude `~/.claude/settings.json` (env/model) + `~/.claude.json` (mcpServers) | cc-switch |
-| /etc/claude-code/managed-settings.json (plugins, immutable) | Nix |
-| `~/.config/opencode/opencode.json` (provider/mcp/model) | cc-switch |
-| opencode static: permission/plugin/compaction/agent.explore/small_model | Nix, via `OPENCODE_CONFIG` store file + `opencode` wrapper |
-| `~/.pi/agent/models.json` (providers) | cc-switch |
-| `~/.pi/agent/settings.json` (defaultProvider/defaultModel/packages/enabledModels) | **runtime** (cc-switch won't write defaults) |
-| `~/.pi/agent/mcp.json` (servers) | **runtime** (cc-switch has no pi MCP writer) |
-| `~/.claude/skills`, `~/.config/opencode/skills`, `~/.pi/agent/skills` | cc-switch SSOT |
-| `.agents/skills` (cross-vendor; cc-switch ignores) | runtime / agent-skills |
+| `~/.config/opencode/opencode.json` | the world (provider + model + static keys + MCP) |
+| `~/.pi/agent/{models,settings,mcp,pi-fff}.json` | the world |
+| `.agents/skills`, `.claude/skills`, `.config/opencode/skills` | the world (symlink trees of the profile's skill sources) |
+| `/etc/claude-code/managed-settings.json` | NixOS (immutable Claude Code plugins) |
+| `~/.claude.json`, `~/.claude/settings.json` | **user-owned** — claude is driven by the `claude` wrapper + `--mcp-config`, never a written settings file |
+| per-project `opencode.json`, `.claude/settings.local.json` | user/project (the `mcp` command, `writing`) |
 
-## `provider` verb map (verified V3/V4)
+## Why not cc-switch-cli
 
-`provider set-default` only works for Hermes/OpenClaw (errors otherwise). Use:
+cc-switch-cli 5.10.5 was researched and smoke-tested end-to-end before this
+design. What the tests actually showed:
 
-- `cc-switch --app claude provider switch <id>` → writes `env.*` + `model` to
-  `~/.claude/settings.json` (key-less; runtime wrapper supplies the agenix key).
-- `cc-switch --app open-code provider switch <id>` → writes the provider node
-  into global `~/.config/opencode/opencode.json` (all providers pre-seeded).
-  **Default `model` is owned by the runtime**: a user-owned `OPENCODE_CONFIG`
-  overlay (higher precedence than global opencode.json) holds `model`/`small_model`,
-  so `provider N` rewrites that overlay to `N/<model>`. No contention (cc-switch
-  doesn't touch model; we don't touch provider/mcp).
-- pi: cc-switch only manages `models.json`; runtime writes
-  `~/.pi/agent/settings.json` (`defaultProvider`/`defaultModel`).
+- `provider add --config-file` is parse-only (key-less records accepted) and
+  never expands `!cat`/`{file:…}` token expressions — good.
+- `provider switch <id>` writes the claude live config and adds the opencode
+  provider node, but **never sets a default model for opencode**, and
+  `provider set-default` errors for everything except Hermes/OpenClaw.
+- cc-switch does not write pi's defaults (`pi_config/mod.rs`: *"Pi owns account
+  login and the active provider/model in settings.json. CC Switch only manages
+  explicit provider entries in models.json."*) and rejects MCP writes for pi
+  (`--app pi mcp` → "does not support pi"; `AppType::Pi => {}`).
+- pi's `models.json` writes take an optimistic revision lock — two writers race.
 
-cc-switch **does not** write a default `model` for opencode (verified: opencode.json
-has no `model` key after `provider switch`) and `provider current` is a no-op for
-opencode — so opencode model switching is the runtime's `provider` command.
+So driving it meant three permanent runtime-owned exceptions (key-less claude
+records + a key-injecting wrapper, an `OPENCODE_CONFIG` overlay for opencode's
+model, a jq-written pi `settings.json`) and left every file with two writers —
+Home Manager force-managing some, cc-switch rewriting others. The renderer that
+we needed anyway (`lib/worlds.nix`) makes cc-switch redundant in the write path,
+so it was dropped rather than kept as a second source of truth.
 
-## Token strategy for claude
+(Claude Code precedence — `settings.json.env` beats the process env and is never
+expanded — still holds, and is why `claude` is a wrapper: the world records the
+provider, and the wrapper injects that provider's key from
+`/run/agenix/<provider>-token` at launch. The key is never written anywhere.)
 
-`ANTHROPIC_API_KEY` is **omitted** from cc-switch's claude provider record and
-injected at launch by the runtime `claude` wrapper, reading the declared provider
-from `~/.local/state/agent-runtime/provider` and sourcing
-`/run/agenix/<provider>-token` only for the bakery ids. Reason: settings.json.env
-wins over the shell env and is never expanded, so any key cc-switch writes would
-freeze the provider's key in plaintext. This keeps the agenix invariant (key never
-on disk, never in the DB).
+## The shipped profiles
 
-## Files (diff plan)
+| Profile | Provider | Skills | MCP |
+|---|---|---|---|
+| `work` (default) | `neoplatform` | `ponytail` (+5 `ponytail-*`), `archify`, `archify-review`, `i-have-adhd` | always-on npm set |
+| `free` | `free` | same coding set | always-on npm set |
+| `study` | `free` | — | always-on npm set (`donsetch` included) |
 
-- `data/profiles.nix` — `base` + `work` profiles (`extends`-based). (NEW)
-- `lib/ccswitch.nix` — `renderProvider app name p`, `resolveProfile profiles name`,
-  `expandMcp mcpReg names`. (NEW, pure)
-- `modules/ccswitch.nix` — shims `profile`/`provider`, seed activation, provider
-  + profile shard farms; `mkIf agent.ccSwitch.enable`. (NEW)
-- `modules/options.nix` — `agent.profiles`, `agent.ccSwitch.{enable,package,profileShards}`. (ADD)
-- `modules/home.nix` — import `./ccswitch.nix`. (ADD)
-- `flake.nix` — `lib.data.profiles` + `.ccswitch`; `checks.profiles-resolve`. (ADD)
-- `/etc/nixos` host: `agent.ccSwitch.enable = true;`; remove the plaintext
-  `ANTHROPIC_*` exports from `~/.zshrc`. (host-side, post-PR2)
-- delete: `mcp` command, `claudeCode.commands` env wiring, `claudeMcpConfig`,
-  opencode provider block in `modules/home.nix`. (PR3)
+`donsetch` + `bladebro` (the npm MCP set) are in every world; ARIS research
+skills stay per-project via `writing`.
 
-## Activation (converges)
+Consumers add profiles with the usual merge — no module, no option plumbing:
 
-Seed once (`~/.local/state/agent-runtime/ccswitch-seeded` marker), then: write
-pi settings.json + `.agents/skills` + OPENCODE_CONFIG + managed-settings + npm;
-seed providers/MCP/skills into cc-switch; apply declared profile/provider from
-state. Rebuild twice = no diff.
+```nix
+agent.profiles = lib.data.profiles // {
+  side = { provider = "free"; skills = [ "ponytail" ]; mcp = [ "nixos" ]; };
+};
+agent.defaultProfile = "side";
+```
 
-## Open questions for PR2
+Bad provider/MCP names and `extends` cycles fail `checks.worlds-resolve`; a bad
+skill source name fails an HM assertion — neither surfaces at a `profile` call.
 
-- `skills import-from-apps` on agent-skills symlink trees: does cc-switch copy
-  store paths into `~/.cc-switch/skills/` (breaks GC safety) or symlink?
-- `provider add --id X` when X exists: confirmed error-prone → seed uses
-  content-hash replace, not blind add.
-- `~/.zshrc` plaintext key must be removed before cutover (it currently leaks
-  into every child process incl. MCP servers).
+## Files
+
+- `lib/worlds.nix` — pure renderer (profile resolve, MCP expand, per-agent
+  dialects, world assembly). (NEW)
+- `data/profiles.nix` — the profile registry (`work`/`free`/`study`). (NEW)
+- `modules/worlds.nix` — bake the worlds, ship `profile` + the profile-following
+  `claude` wrapper + the install-on-activation hook. (NEW, replaces
+  `modules/ccswitch.nix`)
+- `modules/home.nix` — keeps only the per-project mcp farm, binaries and `writing`;
+  no longer force-writes the world files.
+- `modules/skills.nix` — registers the merged source catalog and the per-project
+  `skills` installers, but no longer links the machine-wide trees (the world
+  owns them), so each tree has one writer.
+- `modules/options.nix` — `agent.profiles` + `agent.defaultProfile`; `ccSwitch.*`
+  removed; `claudeCode.commands` is now the fixed helpers (`writing`).
+- `flake.nix` — `lib.data.worlds`, `checks.worlds-resolve`.
+- Deleted: `lib/ccswitch.nix`, `modules/ccswitch.nix`.
