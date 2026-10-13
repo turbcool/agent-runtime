@@ -53,7 +53,7 @@ let
           };
           targets.opencode = {
             enable = true;
-            dest = ".opencode/skills";
+            dest = projectSkillsDir;
             structure = "copy-tree";
           };
         }
@@ -69,6 +69,11 @@ let
   };
 
   skillNames = lib.attrNames sources;
+
+  # Where `skills <source>` installs. The bundle is copied straight out of the
+  # store, so the tree arrives read-only; the dispatcher chmods it back so the
+  # per-project copy is editable and removable like any other project file.
+  projectSkillsDir = ".opencode/skills";
 
   skillsCommand = pkgs.writeShellScriptBin "skills" ''
     if [ $# -eq 0 ]; then
@@ -91,7 +96,8 @@ let
     fi
 
     ( cd . && "$installer" )
-    echo "✓ Skills installed to .opencode/skills: $1"
+    chmod -R u+w ${lib.escapeShellArg projectSkillsDir}
+    echo "✓ Skills installed to ${projectSkillsDir}: $1"
   '';
 in
 {
