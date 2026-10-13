@@ -75,7 +75,7 @@ let
       echo "Usage: skills <source>"
       echo ""
       echo "Sources:"
-    ${lib.concatMapStringsSep "\n" (name: "  ${name}") skillNames}
+    ${lib.concatMapStringsSep "\n" (name: "  echo \"  ${name}\"") skillNames}
       exit 0
     fi
 
@@ -86,7 +86,7 @@ let
       echo "Usage: skills <source>"
       echo ""
       echo "Sources:"
-    ${lib.concatMapStringsSep "\n" (name: "  ${name}") skillNames}
+    ${lib.concatMapStringsSep "\n" (name: "  echo \"  ${name}\"") skillNames}
       exit 1
     fi
 
