@@ -13,6 +13,10 @@
 # The image keeps /nix/store: the agent entrypoints are store-path bash wrappers
 # that exec store paths (claude-code, node, jq, ...), so a "slim" image without
 # the store cannot host them.
+#
+# Docker's layer cache keys on the instruction text, not on what github: resolves
+# to upstream — rebuild with the pinned rev after changing the runtime, or pass
+# --no-cache.
 FROM nixos/nix:2.28.3
 
 # The base image already sets sandbox = false, the cache keys, and a profile with
@@ -21,6 +25,16 @@ FROM nixos/nix:2.28.3
 # package, and what the lucide-icons server shells out to via npx.
 RUN printf 'experimental-features = nix-command flakes\n' >> /etc/nix/nix.conf \
  && nix profile install nixpkgs#nodejs
+
+# The two MCP servers are prebuilt glibc binaries (npm packages, no nix
+# packaging), and nixos/nix ships no /lib64 — so the ELF interpreter the loader
+# looks for simply is not there. Give them the loader plus libc/libm where a
+# normal glibc binary expects to find them. Cheap, and unlike nix-ld it does not
+# depend on the binaries resolving anything else out of the store.
+RUN G="$(nix eval --raw nixpkgs#glibc.outPath)" \
+ && mkdir -p /lib64 /lib/x86_64-linux-gnu \
+ && cp -L "$G/lib/ld-linux-x86-64.so.2" /lib64/ \
+ && cp -L "$G/lib/libc.so.6" "$G/lib/libm.so.6" /lib/x86_64-linux-gnu/
 
 # The whole install in one command: binaries onto PATH, rendered config into
 # $HOME, npm MCP servers seeded, missing tokens reported (a warning, not a
