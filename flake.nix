@@ -137,6 +137,11 @@
           hmConfig = mkHmConfig pkgs homeModulesList;
           cfg = hmConfig.config.agent;
 
+          # Where an npm-sourced pi comes from. llm-agents builds the very same
+          # package, so this reads the version it pinned: the npm fallback in
+          # #install cannot drift from the bundle's pi.
+          piNpmSpec = "@earendil-works/pi-coding-agent@${inputs.llm-agents.packages.${system}.pi.version}";
+
           # Everything modules/home.nix + modules/skills.nix contribute (pi,
           # opencode, claude, claude-free, writing, mcp, skills) — deliberately
           # not `home.packages`, because standalone HM folds its own baseline
@@ -172,6 +177,10 @@
             src = pkgs.replaceVars ./lib/install.sh {
               agentRuntime = "${agentRuntime}";
               agentRuntimeConfig = "${agentRuntimeConfig}";
+              # The npm spec lib/install.sh falls back to when the bundle has no
+              # pi (agent.piFromNpm). Pinned to the same version the bundle
+              # would have carried, so the two sourcing paths never diverge.
+              piNpm = if cfg.piFromNpm then piNpmSpec else "";
             };
           } ''
             mkdir -p $out/bin
@@ -212,10 +221,13 @@
                   builtins.attrNames hmConfig.config.agent.claudeCode.commands
                   ++ [
                     "opencode"
-                    "pi"
                     "mcp"
                     "skills"
                   ]
+                  # pi is in the bundle unless a consumer takes it from npm
+                  # (agent.piFromNpm), in which case lib/install.sh seeds the
+                  # npm package and the npm block below covers it.
+                  ++ lib.optional (!hmConfig.config.agent.piFromNpm) "pi"
                   ++ map (name: "skills-install-${name}") (
                     builtins.attrNames hmConfig.config.programs.agent-skills.sources
                   )

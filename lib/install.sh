@@ -39,6 +39,11 @@ if command -v npm >/dev/null 2>&1; then
   npmServers="donsetch bladebro"
   npm install --prefix "$HOME/.npm" -g \
     --allow-scripts="$(echo $npmServers | tr ' ' ',')" $npmServers || true
+
+  # pi, when the bundle did not carry it (agent.piFromNpm). Same version the
+  # bundle would have had, substituted at build time.
+  [ -z "@piNpm@" ] || [ -x "$binDir/pi" ] || \
+    npm install --prefix "$HOME/.npm" -g "@piNpm@" || true
 fi
 
 missed=""

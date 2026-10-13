@@ -20,5 +20,10 @@
 
   # No desktop shell: the container is entered with `nix develop` / a plain
   # exec, so drop interactive-extras and keep the bundle headless.
+  # pi is JS, so the npm package runs on the image's node — while the nix build
+  # goes through bun, and bun's Rust toolchain (cargo, rustc, llvm) is several
+  # GB of download for a CLI that then gets copied out of the store anyway.
+  agent.piFromNpm = true;
+
   agent.agents.includeTui = false;
 }

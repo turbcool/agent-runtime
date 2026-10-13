@@ -44,6 +44,13 @@ RUN nix run ${RUNTIME}#install
 # The config trees arrive read-only (store paths); the agents must own them.
 RUN chmod -R u+w /root/.pi /root/.config /root/.claude 2>/dev/null || true
 
+# `nix run` leaves everything it needed to *build* the closure in the store: the
+# five flake sources it evaluated (nixpkgs alone is 482 MB) and, before the npm
+# switch, bun's Rust toolchain. The profile is a gcroot, so gc keeps exactly the
+# runtime closure — measured 7.5 GB -> 2.1 GB, and every command still runs.
+RUN nix profile install ${RUNTIME}#agent-runtime \
+ && nix store gc
+
 # /root/.npm/bin is where #install seeds bladebro + donsetch, and the rendered
 # MCP registry resolves them as $HOME/.npm/bin/<server> — which is /root here.
 # A non-root user needs $HOME/.npm/bin on PATH instead.

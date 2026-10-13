@@ -58,6 +58,23 @@
       '';
     };
 
+    # pi, when it is not coming from the nix bundle. `false` everywhere by
+    # default: the bundle's build is hash-pinned, which is the right answer on a
+    # host. A container image sets it true and takes pi from npm instead — see
+    # modules/container.nix for why that is cheaper there.
+    piFromNpm = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      example = true;
+      description = ''
+        Take `pi` from the npm registry instead of the nix bundle. The npm
+        package is plain JS run by node, so this skips pi's build entirely —
+        which drags in bun, and with it cargo, rustc and llvm, several GB of
+        download for a CLI. `lib/install.sh` seeds the npm package in its place,
+        so the command is present either way.
+      '';
+    };
+
     plugins = lib.mkOption {
       type = lib.types.attrs;
       default = import ../data/plugins.nix;

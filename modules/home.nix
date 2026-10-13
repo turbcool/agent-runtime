@@ -217,9 +217,12 @@ let
     commands
     ++ [
       llmAgents.opencode
-      piNoCrawl
       mcpCommand
     ]
+    # pi comes from the bundle unless the consumer takes it from npm — the
+    # wrapper is what drops `--exclude-tools web_crawl`, so an npm pi is a
+    # different tool surface and the flag does not exist there.
+    ++ lib.optional (!cfg.piFromNpm) piNoCrawl
     ++ builtins.attrValues mcpPackages
     # modules/skills.nix builds the per-project installers and the `skills`
     # dispatcher from the merged source set.
