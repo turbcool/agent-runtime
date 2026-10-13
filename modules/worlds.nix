@@ -224,7 +224,12 @@ let
     row=$("$jqbin" -r --arg p "$provider" '.[$p]' "$meta")
 
     export ANTHROPIC_BASE_URL="$("$jqbin" -r '.baseUrl' <<<"$row")"
-    export ANTHROPIC_API_KEY=$(eval "$("$jqbin" -r '.keyShell' <<<"$row")")
+    # keyShell is a shell expression yielding the secret (`$(cat <agenix
+    # path)` on NixOS, `$VAR` in a container). Eval it inside an assignment
+    # so the value is word-expanded, never run as a command: a bare
+    # `eval "$(cat f)"` makes the token the command and leaks it to stderr.
+    key=$("$jqbin" -r '.keyShell' <<<"$row")
+    eval "export ANTHROPIC_API_KEY=\"$key\""
     export ANTHROPIC_DEFAULT_OPUS_MODEL="$("$jqbin" -r '.main' <<<"$row")"
     export ANTHROPIC_DEFAULT_SONNET_MODEL="$("$jqbin" -r '.main' <<<"$row")"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="$("$jqbin" -r '.small' <<<"$row")"
