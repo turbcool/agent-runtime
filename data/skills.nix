@@ -28,9 +28,4 @@
     path = "${runtimeInputs.ponytail.outPath}/skills";
   };
 
-  # qmd ships a maintainer-facing `release` skill next to the useful one.
-  qmd = {
-    path = "${runtimeInputs.qmd.outPath}/skills";
-    filter.nameRegex = "^qmd$";
-  };
-}
+  }

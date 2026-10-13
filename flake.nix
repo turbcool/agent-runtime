@@ -26,7 +26,7 @@
       url = "github:tt-a1i/archify";
       flake = false;
     };
-    qmd.url = "github:tobi/qmd";
+    
 
     # Also loaded as opencode plugins, by absolute store path.
     ponytail = {

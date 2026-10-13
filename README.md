@@ -179,7 +179,7 @@ silent half-switch.
   `lucide-icons`, and the `frontend` / `nixos` groups) is opt-in per project with
   `mcp <group|server>`.
 - **Skills** — the runtime ships `archify`, `archify-review`, `i-have-adhd`,
-  `qmd`, `ponytail` + five `ponytail-*`; a profile selects which of them are
+  `ponytail` + five `ponytail-*`; a profile selects which of them are
   machine-wide. `skills <source>` installs any source into a project on top.
 
 ## Providers
@@ -285,9 +285,9 @@ contributes every markdown file it ships.
 | `i-have-adhd` | `i-have-adhd` | ADHD-aware interaction guidance |
 | `ponytail` | `ponytail` | minimal-solution coding mode (also an opencode plugin) |
 | `ponytail-review` / `-audit` / `-gain` / `-help` / `-debt` | `ponytail` (`skills/`) | the same repo's review, whole-repo audit, scoreboard, cheat-sheet and debt-ledger modes |
-| `qmd` | `qmd` (`skills/`, name-filtered) | local markdown search; the repo's maintainer `release` skill is filtered out |
 
-Ten skills, three targets, one bundle each: `.agents/skills` (cross-vendor),
+
+Nine skills, three targets, one bundle each: `.agents/skills` (cross-vendor),
 `.claude/skills`, `.config/opencode/skills`. On NixOS `modules/skills.nix` only
 declares the sources and agent-skills' activation links the trees; for the
 standalone config there is no activation, so the filtered bundles are
