@@ -31,8 +31,14 @@ chmod -R u+w "$HOME/.pi" "$HOME/.config/opencode" 2>/dev/null || true
 
 # pi/npm seed declared packages at startup; the two npm MCP servers are not Nix
 # packages and have no other install step, so do it here if npm is present.
+# --allow-scripts is not optional: npm 11 gates lifecycle scripts by default and
+# both servers download their platform binary in postinstall, so without it you
+# get two wrappers with no binary behind them (and npm skips the scripts of an
+# already-installed package, so a later repair run does not help either).
 if command -v npm >/dev/null 2>&1; then
-  npm install --prefix "$HOME/.npm" -g donsetch bladebro || true
+  npmServers="donsetch bladebro"
+  npm install --prefix "$HOME/.npm" -g \
+    --allow-scripts="$(echo $npmServers | tr ' ' ',')" $npmServers || true
 fi
 
 missed=""
