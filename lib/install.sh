@@ -24,7 +24,9 @@ cp -rPn "$src/bin/"* "$binDir"/
 
 # The config farm is a linkFarm of read-only store paths; make it writable
 # where the agents expect to mutate ($HOME/.pi/.../sessions, opencode.json).
-cp -rLn "$cfg/" "$HOME"
+# "$cfg/." and not "$cfg/": with a trailing slash cp copies the farm directory
+# itself into $HOME and leaves none of its contents where the agents look.
+cp -rLn "$cfg/." "$HOME"
 chmod -R u+w "$HOME/.pi" "$HOME/.config/opencode" 2>/dev/null || true
 
 # pi/npm seed declared packages at startup; the two npm MCP servers are not Nix

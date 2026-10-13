@@ -26,8 +26,9 @@ RUN printf 'experimental-features = nix-command flakes\n' >> /etc/nix/nix.conf \
 # $HOME, npm MCP servers seeded, missing tokens reported (a warning, not a
 # failure — the tokens belong to the run, not the build).
 ARG RUNTIME=github:turbcool/agent-runtime
-RUN nix run ${RUNTIME}#install \
- && chmod -R u+w /root/.pi /root/.config /root/.claude
+RUN nix run ${RUNTIME}#install
+# The config trees arrive read-only (store paths); the agents must own them.
+RUN chmod -R u+w /root/.pi /root/.config /root/.claude 2>/dev/null || true
 
 # /root/.npm/bin is where #install seeds bladebro + donsetch, and the rendered
 # MCP registry resolves them as $HOME/.npm/bin/<server> — which is /root here.
