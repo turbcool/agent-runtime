@@ -72,6 +72,20 @@ mime-support) into that list. `#agent-runtime-config` is a `linkFarm` of
 Export `AGENT_NEOPLATFORM_TOKEN`, `AGENT_CUSTOM_TOKEN`, `AGENT_FREE_TOKEN`
 before running an agent.
 
+Or take the whole thing as an image (`docker/Dockerfile`):
+
+```bash
+docker build -t agent-runtime -f docker/Dockerfile .
+docker run --rm -it -v "$PWD:/work" -w /work \
+  -e AGENT_FREE_TOKEN="$AGENT_FREE_TOKEN" agent-runtime
+```
+
+It is `nixos/nix` plus exactly one `nix run #install`, so the image contains
+the store the agents exec out of — there is no "slim" variant that drops it.
+`claude` picks its provider from the *active world*, not from whichever token is
+present: `profile` lists them, `profile free` activates one, and a fresh
+container has no world yet so it falls back to `agent.defaultProfile`.
+
 ### NixOS host
 
 ```nix

@@ -35,3 +35,8 @@ RUN chmod -R u+w /root/.pi /root/.config /root/.claude 2>/dev/null || true
 # A non-root user needs $HOME/.npm/bin on PATH instead.
 ENV PATH=/root/.npm/bin:/root/.local/bin:$PATH
 WORKDIR /work
+
+# `claude` reads its provider from the active world, not from whichever token is
+# exported: run `profile` to list them and `profile free` to pick one. A fresh
+# container has no world state yet, so it falls back to agent.defaultProfile
+# (currently `work` → neoplatform). Pass only the token that world needs.
