@@ -39,17 +39,18 @@ RUN G="$(nix eval --raw nixpkgs#glibc.outPath)" \
 # The whole install in one command: binaries onto PATH, rendered config into
 # $HOME, npm MCP servers seeded, missing tokens reported (a warning, not a
 # failure — the tokens belong to the run, not the build).
+#
+# The gc belongs in THIS layer, not a later one. Docker commits the end state of
+# a RUN, so pruning here means the flake sources it evaluated (nixpkgs alone is
+# 482 MB) and any build toolchain never reach the image at all. Pruning in a
+# later RUN leaves them in the earlier layer's tar and the image only drops from
+# 6.4 GB to 4.2 GB, which is nearly nothing.
 ARG RUNTIME=github:turbcool/agent-runtime
-RUN nix run ${RUNTIME}#install
-# The config trees arrive read-only (store paths); the agents must own them.
-RUN chmod -R u+w /root/.pi /root/.config /root/.claude 2>/dev/null || true
-
-# `nix run` leaves everything it needed to *build* the closure in the store: the
-# five flake sources it evaluated (nixpkgs alone is 482 MB) and, before the npm
-# switch, bun's Rust toolchain. The profile is a gcroot, so gc keeps exactly the
-# runtime closure — measured 7.5 GB -> 2.1 GB, and every command still runs.
-RUN nix profile install ${RUNTIME}#agent-runtime \
- && nix store gc
+RUN nix run ${RUNTIME}#install \
+ && nix profile install ${RUNTIME}#agent-runtime \
+ && nix store gc \
+ && { chmod -R u+w /root/.pi /root/.config /root/.claude 2>/dev/null || true; } \
+ && rm -rf /root/.npm/_cacache /root/.cache/nix
 
 # /root/.npm/bin is where #install seeds bladebro + donsetch, and the rendered
 # MCP registry resolves them as $HOME/.npm/bin/<server> — which is /root here.
