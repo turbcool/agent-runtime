@@ -164,16 +164,20 @@
           # One command instead of the documented four steps: install the bundle
           # on PATH, copy the config farm onto the writable $HOME, seed the npm
           # packages the agents expect, and report which tokens are still missing.
-          install = pkgs.substitute {
-            name = "agent-runtime-install";
-            src = ./lib/install.sh;
-            dir = "bin";
-            executable = true;
-            substitutions = [
-              "--replace" "@agentRuntime@" "${agentRuntime}"
-              "--replace" "@agentRuntimeConfig@" "${agentRuntimeConfig}"
-            ];
-          };
+          # Written out rather than `pkgs.substitute { executable = true; }`:
+          # that helper's builder chmods only when the env var `isExecutable` is
+          # set, which an `executable` attr never becomes, so it shipped a 444
+          # file that no exec could run.
+          install = pkgs.runCommand "agent-runtime-install" {
+            src = pkgs.replaceVars ./lib/install.sh {
+              agentRuntime = "${agentRuntime}";
+              agentRuntimeConfig = "${agentRuntimeConfig}";
+            };
+          } ''
+            mkdir -p $out/bin
+            cp $src $out/bin/agent-runtime-install
+            chmod +x $out/bin/agent-runtime-install
+          '';
         in
         {
           inherit agentRuntime agentRuntimeConfig install;
