@@ -1,0 +1,30 @@
+# Weekly lock bump. This repo's flake.lock is the only place package versions
+# are decided, so clients can never be newer than it: keeping this fresh is
+# what turns "latest" into `nix flake update agent-runtime` on their side.
+name: bump-lock
+
+on:
+  schedule: [ { cron: "17 4 * * 1" } ]
+  workflow_dispatch:
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+
+      - run: nix flake update
+
+      # ponytail: eval-only gate — catches a bump that breaks profile rendering
+      # or option wiring in seconds. Full builds stay client-side, where the
+      # binary cache is.
+      - run: nix flake check --no-build --all-systems
+
+      - run: |
+          git diff --quiet && exit 0
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -qam "flake: weekly lock bump"
+          git push
