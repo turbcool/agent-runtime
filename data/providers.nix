@@ -39,7 +39,7 @@
       context = 128000;
       output = 32000;
     };
-    models."gemma-4-31b-it".limit = {
+    models."qwen3.6-200k:35b".limit = {
       context = 200000;
       output = 32000;
     };
@@ -54,10 +54,6 @@
     claudeModel = {
       main = "deepseek-v4-flash";
       small = "qwen3-coder-next";
-    };
-    models."deepseek-v4-flash-direct".limit = {
-      context = 200000;
-      output = 32000;
     };
     models."deepseek-v4-flash".limit = {
       context = 200000;
@@ -75,16 +71,7 @@
       main = "main";
       small = "small";
     };
-    models."muse-spark-1.3-contributor" = {
-      name = "Muse Spark 1.3 Contributor";
-      limit = {
-        context = 128000;
-        output = 32000;
-      };
-    };
-    models."main".limit = {
-      context = 256000;
-      output = 32000;
-    };
+    models."main".limit = {};
+
   };
 }
