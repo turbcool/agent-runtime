@@ -71,7 +71,10 @@
       main = "main";
       small = "small";
     };
-    models."main".limit = {};
+    models."main".limit = {
+      context = 256000;
+      output = 32000;
+    };
 
   };
 }
