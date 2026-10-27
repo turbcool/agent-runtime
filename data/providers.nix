@@ -75,6 +75,9 @@
       context = 256000;
       output = 32000;
     };
-
+    models."qwen3.8-27b".limit = {
+      context = 256000;
+      output = 32000;
+    };
   };
 }
